@@ -28,4 +28,4 @@ dependencies:
       - cffi>=1.16.0
       - cython>=3.0.0
 
-      #- -e .
+      - -e .
