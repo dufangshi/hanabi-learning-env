@@ -1,0 +1,31 @@
+name: hanabi_learning_env
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  # --- core python ---
+  - python=3.11
+
+  # --- build tools ---
+  - setuptools>=69.0.0
+  - wheel>=0.42.0
+  - pip>=24.0
+  - cmake
+  - make
+  # --- for linux ---
+  #- gcc_linux-64
+  #- gxx_linux-64
+  # --- for mac ---
+  - clang
+  - clangxx
+
+
+  # --- pip packages ---
+  - pip:
+      # Hanabi environment
+      - cffi>=1.16.0
+      - cython>=3.0.0
+
+      #- -e .
