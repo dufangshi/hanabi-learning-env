@@ -5,16 +5,14 @@ from setuptools import find_packages, setup
 from setuptools.command.develop import develop
 from setuptools.command.install import install
 
-REPO_URL = "https://github.com/deepmind/hanabi-learning-environment.git"
 ROOT = Path(__file__).resolve().parent
-HANABI_DIR = ROOT / "third_party" / "hanabi-learning-environment"
+HANABI_DIR = ROOT / "third_party" / "hanabi"
 
 
 def _build_hanabi() -> None:
-    """Clone and build the Hanabi Learning Environment C++ extension."""
+    """Build the Hanabi Learning Environment C++ extension."""
     if not HANABI_DIR.exists():
-        HANABI_DIR.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.check_call(["git", "clone", REPO_URL, str(HANABI_DIR)])
+        raise RuntimeError(f"Hanabi directory not found at {HANABI_DIR}")
 
     build_dir = HANABI_DIR / "build"
     build_dir.mkdir(parents=True, exist_ok=True)

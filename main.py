@@ -1,4 +1,4 @@
-"""Simple demo using pyhanabi to play a random move."""
+"""Simple demo using Hanabi_env to play random moves and get vectorized observations."""
 from __future__ import annotations
 
 import random
@@ -6,14 +6,15 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-HANABI_SRC = ROOT / "third_party" / "hanabi-learning-environment"
-HEADER_DIR = HANABI_SRC / "hanabi_learning_environment"
-LIB_DIR = HANABI_SRC / "build" / "hanabi_learning_environment"
+HANABI_SRC = ROOT / "third_party" / "hanabi"
+HEADER_DIR = HANABI_SRC
+LIB_DIR = HANABI_SRC  # Library is in the root hanabi directory
 
 if str(HANABI_SRC) not in sys.path:
     sys.path.insert(0, str(HANABI_SRC))
 
-from hanabi_learning_environment import pyhanabi
+import pyhanabi
+from Hanabi_Env import HanabiEnv
 
 
 def _ensure_pyhanabi_loaded() -> None:
@@ -27,35 +28,50 @@ def _ensure_pyhanabi_loaded() -> None:
             raise RuntimeError("Failed to load libpyhanabi shared library")
 
 
-def _advance_chance(state: pyhanabi.HanabiState) -> None:
-    """Resolve chance events (card deals) so the next player can act."""
-    while not state.is_terminal() and state.cur_player() == pyhanabi.CHANCE_PLAYER_ID:
-        state.deal_random_card()
-
-
 def main() -> None:
     _ensure_pyhanabi_loaded()
 
-    game = pyhanabi.HanabiGame({"players": 2, "random_start_player": False})
-    state = game.new_initial_state()
+    # Create a simple args object for HanabiEnv
+    class Args:
+        hanabi_name = "Hanabi-Full"
+        num_agents = 2
+        use_obs_instead_of_state = True
 
-    _advance_chance(state)
+    # Create Hanabi environment
+    env = HanabiEnv(Args(), seed=0)
 
-    print("Initial state:")
-    print(state)
+    print(f"Vectorized observation shape: {env.vectorized_observation_shape()}")
+    print(f"Vectorized share observation shape: {env.vectorized_share_observation_shape()}")
+    print()
 
-    legal_moves = state.legal_moves()
-    if not legal_moves:
-        raise RuntimeError("No legal moves available in the initial state")
+    # Reset environment
+    obs, share_obs, available_actions = env.reset()
+    print(f"Initial state - Current player: {env.state.cur_player()}")
 
-    move = random.choice(legal_moves)
-    print(f"Randomly selected move: {move}")
+    print(f"Observation length: {len(obs)}")
+    print(f"Share observation length: {len(share_obs)}")
+    print(f"Available actions length: {len(available_actions)}")
+    print(f"Available actions: {available_actions}")
+    print(f"Observation (first 50 elements): {obs[:50]}")
+    print()
 
-    state.apply_move(move)
-    _advance_chance(state)
+    # Take a random action from available actions
+    legal_action_indices = [i for i, valid in enumerate(available_actions) if valid == 1]
+    if not legal_action_indices:
+        raise RuntimeError("No legal moves available")
 
-    print("\nState after applying the move:")
-    print(state)
+    action = random.choice(legal_action_indices)
+    print(f"Taking random action: {action}")
+
+    # Step environment (HanabiEnv expects action as array/list)
+    obs, share_obs, rewards, done, infos, available_actions = env.step([action])
+
+    print(f"\nAfter action - Current player: {env.state.cur_player()}")
+    print(f"Rewards: {rewards}, Done: {done}")
+    print(f"Observation length: {len(obs)}")
+    print(f"Share observation length: {len(share_obs)}")
+    print(f"Available actions: {available_actions}")
+    print(f"Observation (first 50 elements): {obs[:50]}")
 
 
 if __name__ == "__main__":
