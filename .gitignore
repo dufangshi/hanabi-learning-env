@@ -25,7 +25,8 @@ ENV/
 .DS_Store
 
 # Hanabi third-party dependency and build outputs
-third_party/hanabi-learning-environment/
+#third_party/hanabi-learning-environment/
+*/build/*
 
 # Local cmake artifacts
 CMakeCache.txt
