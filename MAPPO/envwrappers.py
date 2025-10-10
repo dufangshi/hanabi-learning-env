@@ -1,7 +1,4 @@
-"""train file guide: https://github.com/zoeyuchao/mappo/blob/main/onpolicy/scripts/train/train_hanabi_forward.py"""
-
 #citation: code from https://github.com/zoeyuchao/mappo/blob/main/onpolicy/envs/env_wrappers.py
-#TODO: get multiprocessing working correctly 
 import numpy as np
 import torch
 from multiprocessing import Process, Pipe
