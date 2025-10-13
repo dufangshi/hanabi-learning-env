@@ -160,7 +160,7 @@ class ActorNetwork(nn.Module):
         actions, action_log_probs = self.act(actor_features, available_actions)
 
         return actions, action_log_probs
-    def evaluate_actions(self, obs, action, masks, available_actions=None, active_masks=None):
+    def evaluate_actions(self, obs, action, available_actions=None, active_masks=None):
         #TODO: implement. Notice that rnn_states is removed since it is unneeded 
         pass 
 # Should be similar to R_Critic class in https://github.com/zoeyuchao/mappo/blob/79f6591882088a0f583f7a4bcba44041141f25f5/onpolicy/algorithms/r_mappo/algorithm/r_actor_critic.py
