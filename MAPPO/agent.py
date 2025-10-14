@@ -1,6 +1,7 @@
 import copy
 import argparse
 import os
+from typing import Dict
 import numpy as np
 import torch
 import torch.nn as nn
@@ -41,7 +42,7 @@ class MAPPOAgent:
         self.tpdv = dict(dtype=torch.float32, device=self.device)
         
 
-        self.clip_epislon = args.clip_epislon #changed this name from clip_param
+        self.clip_epsilon = args.clip_epsilon #changed this name from clip_param
         # self.ppo_epoch = args.ppo_epoch #
         # self.num_mini_batch = args.num_mini_batch
         # self.data_chunk_length = args.data_chunk_length 
@@ -135,7 +136,7 @@ class MAPPOAgent:
     
     def _actor_critic_step(self, batch: Dict[str, torch.Tensor], 
                            update_actor: bool = True) -> Dict[str, float]:
-         """
+        """
         One gradient step on a mini-batch.
         batch contain:
           obs, cent_obs, actions, old_log_probs, advs, returns, old_values,
@@ -159,7 +160,8 @@ class MAPPOAgent:
         new_log_probs, entropy = None, None
         policy_loss = torch.tensor(0.0, **self.tpdv)
         if update_actor:
-            new_log_probs, entropy = self.actor.evaluate_actions(obs, action, available_actions)
+            # new_log_probs, entropy = self.actor.evaluate_actions(obs, action, available_actions) TODO
+            new_log_probs, entropy = self.actor.evaluate_actions(obs, actions, available_actions)
             ratio = torch.exp(new_log_probs - old_log_probs)
 
             surr1 = ratio * advs

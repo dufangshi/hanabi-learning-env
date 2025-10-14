@@ -68,6 +68,9 @@ if __name__ == "__main__":
     args.add_argument("--use_orthogonal", type=int, default=1) 
     args.add_argument("--use_ReLU", type=bool, default=True) 
     args.add_argument("--layer_N", type=int, default=1) 
+    args.add_argument("--clip_epsilon", type=float, default=0.2)
+    args.add_argument("--use_clipped_value_loss", type=bool, default=True)
+    args.add_argument("--use_huber_loss", type=bool, default=True)
     argsconfig = args.parse_args()
 
 
