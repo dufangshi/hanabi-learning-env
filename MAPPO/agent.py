@@ -37,8 +37,8 @@ class MAPPOAgent:
     """ Combines R_MAPPO and R_MAPPOPolicy from the guide repo
     """
     #notice policy removed from inputs
-    def __init__(self, args,obs_space,cent_obs_space,act_space, devices=torch.device("cpu")):
-        self.device = devices
+    def __init__(self, args,obs_space,cent_obs_space,act_space, device=torch.device("cpu")):
+        self.device = device
         self.tpdv = dict(dtype=torch.float32, device=self.device)
         
 
