@@ -3,7 +3,11 @@ import numpy as np
 import torch
 from multiprocessing import Process, Pipe
 from abc import ABC, abstractmethod
-from utils.util import tile_images
+
+try:  # Support both package and script styles.
+    from .utils.util import tile_images
+except ImportError:  # pragma: no cover - fallback when executed directly
+    from utils.util import tile_images
 
 class CloudpickleWrapper(object):
     """

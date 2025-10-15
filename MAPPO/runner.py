@@ -9,21 +9,109 @@ As an example of how to get the interactions going see testinginteraction.py
 """
 
 import sys
+import time
+from pathlib import Path
+from typing import Iterable, Optional
+
 import numpy as np
 import torch
-import time
-from utils.util import _t2n, get_shape_from_obs_space, get_shape_from_act_space
-from config import HanabiConfig
 
-def make_train_env(all_args):
-    raise NotImplementedError  #TODO
+try:  # Keep compatibility whether run as module or script.
+    from .utils.util import _t2n, get_shape_from_obs_space, get_shape_from_act_space
+    from .config import HanabiConfig, get_config
+    from .envwrappers import ChooseDummyVecEnv, ChooseSubprocVecEnv
+except ImportError:  # pragma: no cover - fallback for direct execution
+    from utils.util import _t2n, get_shape_from_obs_space, get_shape_from_act_space
+    from config import HanabiConfig, get_config
+    from envwrappers import ChooseDummyVecEnv, ChooseSubprocVecEnv
 
-def make_eval_env(all_args):
-    raise NotImplementedError  #TODO
+ROOT = Path(__file__).resolve().parent.parent
+HANABI_SRC = ROOT / "third_party" / "hanabi"
+HEADER_DIR = HANABI_SRC
+LIB_DIR = HANABI_SRC
 
-def main(args):
-    # will make a runner and call runner.run()
-    raise NotImplementedError  #TODO
+if str(HANABI_SRC) not in sys.path:
+    sys.path.insert(0, str(HANABI_SRC))
+
+try:
+    import pyhanabi  # type: ignore
+    from Hanabi_Env import HanabiEnv  # type: ignore
+except ImportError as exc:  # pragma: no cover - loaded dynamically at runtime
+    pyhanabi = None  # type: ignore
+    HanabiEnv = None  # type: ignore
+    _PYHANABI_IMPORT_ERROR = exc
+else:
+    _PYHANABI_IMPORT_ERROR = None
+
+
+def _ensure_pyhanabi_loaded() -> None:
+    """Load pyhanabi's C definitions and shared library if necessary."""
+    if pyhanabi is None or HanabiEnv is None:
+        raise ImportError(
+            "pyhanabi is not available. Ensure third_party/hanabi is built."
+        ) from _PYHANABI_IMPORT_ERROR
+
+    if not pyhanabi.cdef_loaded():
+        if not pyhanabi.try_cdef(prefixes=[str(HEADER_DIR)]):
+            raise RuntimeError("Failed to load pyhanabi headers via cdef().")
+
+    if not pyhanabi.lib_loaded():
+        if not pyhanabi.try_load(prefixes=[str(LIB_DIR), str(HEADER_DIR)]):
+            raise RuntimeError("Failed to load the pyhanabi shared library.")
+
+
+def _build_vec_env(all_args: HanabiConfig, n_envs: int):
+    """Create a vectorised Hanabi environment matching the MAPPO runner API."""
+    if n_envs <= 0:
+        return None
+
+    def get_env_fn(rank: int):
+        _ensure_pyhanabi_loaded()
+
+        def init_env():
+            # Use rank offset to decorrelate env seeds when running in parallel.
+            seed = int(time.time()) + rank
+            return HanabiEnv(all_args, seed)
+
+        return init_env
+
+    if n_envs == 1:
+        return ChooseDummyVecEnv([get_env_fn(0)])
+    env_fns = [get_env_fn(i) for i in range(n_envs)]
+    return ChooseSubprocVecEnv(env_fns)
+
+
+def make_train_env(all_args: HanabiConfig):
+    """Factory for training environments. Returns a vectorised env wrapper."""
+    return _build_vec_env(all_args, all_args.n_rollout_threads)
+
+
+def make_eval_env(all_args: HanabiConfig):
+    """Factory for evaluation environments (if evaluation enabled)."""
+    return _build_vec_env(all_args, all_args.n_eval_rollout_threads)
+
+
+def main(argv: Optional[Iterable[str]] = None):
+    """Entry-point used by CLI tooling (e.g. `python -m MAPPO.runner`)."""
+    if argv is not None:
+        argv = list(argv)
+        sys.argv = [sys.argv[0], *argv]
+
+    all_args = get_config()
+    envs = make_train_env(all_args)
+    eval_envs = make_eval_env(all_args) if all_args.use_eval else None
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    runner = HanabiRunner(
+        dict(
+            all_args=all_args,
+            envs=envs,
+            eval_envs=eval_envs,
+            device=device,
+            num_agents=all_args.num_agents,
+        )
+    )
+    runner.run()
 
 
 class HanabiRunner:
