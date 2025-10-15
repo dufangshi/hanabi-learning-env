@@ -5,7 +5,11 @@ from typing import Dict
 import numpy as np
 import torch
 import torch.nn as nn
-from networks import ActorNetwork, CriticNetwork
+
+try:  # Support running as package/module
+    from .networks import ActorNetwork, CriticNetwork
+except ImportError:  # pragma: no cover - fallback when executed directly
+    from networks import ActorNetwork, CriticNetwork
 
 
 
@@ -42,21 +46,18 @@ class MAPPOAgent:
         self.tpdv = dict(dtype=torch.float32, device=self.device)
         
 
-        self.clip_epsilon = args.clip_epsilon #changed this name from clip_param
-        # self.ppo_epoch = args.ppo_epoch #
-        # self.num_mini_batch = args.num_mini_batch
-        # self.data_chunk_length = args.data_chunk_length 
-        # self.value_loss_coef = args.value_loss_coef
-        # self.entropy_coef = args.entropy_coef
-        # self.max_grad_norm = args.max_grad_norm       
-        # self.huber_delta = args.huber_delta
-        # # self._use_recurrent_policy = args.use_recurrent_policy
-        # # self._use_naive_recurrent = args.use_naive_recurrent_policy
-        # self._use_max_grad_norm = args.use_max_grad_norm
-        self._use_clipped_value_loss = args.use_clipped_value_loss
-        self._use_huber_loss = args.use_huber_loss
-        # self._use_popart = args.use_popart
-        # self._use_valuenorm = args.use_valuenorm
+        self.clip_epsilon = getattr(args, "clip_epsilon", getattr(args, "clip_param", 0.2))
+        self.ppo_epoch = getattr(args, "ppo_epoch", 4)
+        self.num_mini_batch = getattr(args, "num_mini_batch", 1)
+        self.data_chunk_length = getattr(args, "data_chunk_length", None)
+        self.value_loss_coef = getattr(args, "value_loss_coef", 0.5)
+        self.entropy_coef = getattr(args, "entropy_coef", 0.01)
+        self.max_grad_norm = getattr(args, "max_grad_norm", 0.5)
+        self.huber_delta = getattr(args, "huber_delta", 1.0)
+        self.use_clipped_value_loss = getattr(args, "use_clipped_value_loss", True)
+        self.use_huber_loss = getattr(args, "use_huber_loss", True)
+        # self._use_recurrent_policy = args.use_recurrent_policy if hasattr(args, "use_recurrent_policy") else False
+        # self._use_naive_recurrent = args.use_naive_recurrent_policy if hasattr(args, "use_naive_recurrent_policy") else False
 
         #TODO: not sure if we need these
         # self._use_value_active_masks = args.use_value_active_masks
@@ -113,7 +114,7 @@ class MAPPOAgent:
     @torch.no_grad()
     def get_values(self, cent_obs):
         cent_obs = check(cent_obs).to(**self.tpdv)
-        values, _ = self.critic(cent_obs)
+        values = self.critic(cent_obs)
         return values
     
     #-----------------------Training-----------------
