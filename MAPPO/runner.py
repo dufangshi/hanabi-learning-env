@@ -1,10 +1,6 @@
 """
-Entry point for running MAPPO agents in the Hanabi learning environment.
-
-This module provides lightweight helpers to build vectorised Hanabi environments
-and a minimal runner that can roll out the current MAPPO agent implementation.
+Hanabi MAPPO runner with per-agent turn-based data collection.
 """
-
 from __future__ import annotations
 
 import sys
@@ -15,15 +11,16 @@ from typing import Iterable, Optional
 import numpy as np
 import torch
 
-try:  # Allow running as a package or as a script.
+try:
     from .config import HanabiConfig, get_config
     from .envwrappers import ChooseDummyVecEnv, ChooseSubprocVecEnv
     from .buffer import RolloutBuffer
-except ImportError:  # pragma: no cover - fallback for direct execution
+    from .utils.util import get_shape_from_obs_space, get_shape_from_act_space
+except ImportError:  # pragma: no cover
     from config import HanabiConfig, get_config
     from envwrappers import ChooseDummyVecEnv, ChooseSubprocVecEnv
     from buffer import RolloutBuffer
-
+    from utils.util import get_shape_from_obs_space, get_shape_from_act_space
 
 ROOT = Path(__file__).resolve().parent.parent
 HANABI_SRC = ROOT / "third_party" / "hanabi"
@@ -36,7 +33,7 @@ if str(HANABI_SRC) not in sys.path:
 try:
     import pyhanabi  # type: ignore
     from Hanabi_Env import HanabiEnv  # type: ignore
-except ImportError as exc:  # pragma: no cover - loaded dynamically at runtime
+except ImportError as exc:  # pragma: no cover
     pyhanabi = None  # type: ignore
     HanabiEnv = None  # type: ignore
     _PYHANABI_IMPORT_ERROR = exc
@@ -45,7 +42,6 @@ else:
 
 
 def _ensure_pyhanabi_loaded() -> None:
-    """Load pyhanabi's C definitions and shared library if necessary."""
     if pyhanabi is None or HanabiEnv is None:
         raise ImportError(
             "pyhanabi is not available. Ensure third_party/hanabi is built."
@@ -61,7 +57,6 @@ def _ensure_pyhanabi_loaded() -> None:
 
 
 def _build_vec_env(all_args: HanabiConfig, n_envs: int):
-    """Create a vectorised Hanabi environment matching the MAPPO runner API."""
     if n_envs <= 0:
         return None
 
@@ -69,7 +64,6 @@ def _build_vec_env(all_args: HanabiConfig, n_envs: int):
         _ensure_pyhanabi_loaded()
 
         def init_env():
-            # Use a time-based seed offset so that parallel workers are decorrelated.
             seed = int(time.time()) + rank
             return HanabiEnv(all_args, seed)
 
@@ -82,17 +76,14 @@ def _build_vec_env(all_args: HanabiConfig, n_envs: int):
 
 
 def make_train_env(all_args: HanabiConfig):
-    """Factory for training environments. Returns a vectorised env wrapper."""
     return _build_vec_env(all_args, all_args.n_rollout_threads)
 
 
 def make_eval_env(all_args: HanabiConfig):
-    """Factory for evaluation environments (if evaluation enabled)."""
     return _build_vec_env(all_args, all_args.n_eval_rollout_threads)
 
 
 def main(argv: Optional[Iterable[str]] = None):
-    """CLI entry-point (e.g. `python -m MAPPO.runner`)."""
     if argv is not None:
         argv = list(argv)
         sys.argv = [sys.argv[0], *argv]
@@ -115,8 +106,6 @@ def main(argv: Optional[Iterable[str]] = None):
 
 
 class HanabiRunner:
-    """Minimal runner that steps Hanabi environments with the MAPPO agent."""
-
     def __init__(self, config):
         self.all_args: HanabiConfig = config["all_args"]
         self.envs = config["envs"]
@@ -136,6 +125,9 @@ class HanabiRunner:
         self.use_eval = self.all_args.use_eval
         self.log_interval = self.all_args.log_interval
 
+        self.use_centralized_V = True
+        self.true_total_num_steps = 0
+
         try:
             from .agent import MAPPOAgent
         except ImportError:  # pragma: no cover
@@ -153,152 +145,306 @@ class HanabiRunner:
             device=self.device,
         )
 
-        obs_shape = tuple(obs_space.shape) if hasattr(obs_space, "shape") else tuple(obs_space)
-        cent_obs_shape = (
-            tuple(shared_obs_space.shape)
-            if hasattr(shared_obs_space, "shape")
-            else tuple(shared_obs_space)
-        )
+        obs_shape = tuple(get_shape_from_obs_space(obs_space))
+        share_obs_shape = tuple(get_shape_from_obs_space(shared_obs_space))
+        action_shape = (get_shape_from_act_space(act_space),)
+
+        self.act_dim = act_space.n
 
         self.buffer = RolloutBuffer(
             T=self.episode_length,
             n_envs=self.n_rollout_threads,
-            n_agents=1,
+            n_agents=self.num_agents,
             obs_shape=obs_shape,
-            cent_obs_shape=cent_obs_shape,
-            action_shape=1,
+            cent_obs_shape=share_obs_shape,
+            action_shape=action_shape,
             gamma=self.all_args.gamma,
             gae_lambda=self.all_args.gae_lambda,
             device=torch.device("cpu"),
             store_available_actions=True,
-            act_dim=act_space.n,
-            store_active_masks=False,
+            act_dim=self.act_dim,
+            store_active_masks=True,
         )
-        self.last_score: Optional[float] = None
 
-    def _reset_envs(self, mask: Optional[np.ndarray] = None):
-        if mask is None:
-            mask = np.ones(self.n_rollout_threads, dtype=bool)
-        obs, share_obs, available_actions = self.envs.reset(mask)
-        return (
-            np.asarray(obs, dtype=np.float32),
-            np.asarray(share_obs, dtype=np.float32),
-            np.asarray(available_actions, dtype=np.float32),
+        self._init_turn_buffers(obs_shape, share_obs_shape, act_space.n)
+        self.episode_scores: list[float] = []
+        self.env_live_mask = np.ones(self.n_rollout_threads, dtype=bool)
+        self.current_episode_reward = np.zeros(self.n_rollout_threads, dtype=np.float32)
+        self.current_episode_length = np.zeros(self.n_rollout_threads, dtype=np.int32)
+        self.episode_reward_history: list[float] = []
+        self.episode_length_history: list[int] = []
+
+    def _init_turn_buffers(self, obs_shape, share_obs_shape, act_dim):
+        self.turn_obs = np.zeros(
+            (self.n_rollout_threads, self.num_agents) + obs_shape, dtype=np.float32
         )
+        self.turn_share_obs = np.zeros(
+            (self.n_rollout_threads, self.num_agents) + share_obs_shape, dtype=np.float32
+        )
+        self.turn_available_actions = np.zeros(
+            (self.n_rollout_threads, self.num_agents, act_dim), dtype=np.float32
+        )
+        self.turn_values = np.zeros(
+            (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
+        )
+        self.turn_actions = np.zeros(
+            (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
+        )
+        self.turn_action_log_probs = np.zeros(
+            (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
+        )
+        self.turn_masks = np.zeros(
+            (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
+        )
+        self.turn_active_masks = np.ones(
+            (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
+        )
+        self.turn_bad_masks = np.ones(
+            (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
+        )
+        self.turn_rewards = np.zeros(
+            (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
+        )
+        self.turn_rewards_since_last_action = np.zeros_like(self.turn_rewards)
+
+    def warmup(self):
+        reset_choose = np.ones(self.n_rollout_threads, dtype=bool)
+        obs, share_obs, available_actions = self.envs.reset(reset_choose)
+        share_obs = share_obs if self.use_centralized_V else obs
+
+        self.use_obs = obs.copy()
+        self.use_share_obs = share_obs.copy()
+        self.use_available_actions = available_actions.copy()
+
+        self.buffer.share_obs[0] = share_obs.copy()
+        self.buffer.obs[0] = obs.copy()
+        self.buffer.value_preds[0] = np.zeros(
+            (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
+        )
+        self.buffer.masks[0] = np.ones(
+            (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
+        )
+        if self.buffer.available_actions is not None:
+            self.buffer.available_actions[0] = available_actions.copy()
+        self.env_live_mask[:] = True
+        self.current_episode_reward.fill(0.0)
+        self.current_episode_length.fill(0)
 
     def run(self):
         if self.envs is None:
             raise RuntimeError("Training environments are not initialised.")
 
-        obs, share_obs, available_actions = self._reset_envs()
+        self.warmup()
+
+        episodes = (
+            self.num_env_steps // self.episode_length // self.n_rollout_threads
+        )
 
         total_env_steps = 0
         finished_episodes = 0
 
-        steps_per_update = max(1, self.episode_length)
-        num_updates = max(
-            1, self.num_env_steps // (steps_per_update * max(1, self.n_rollout_threads))
-        )
+        for episode in range(episodes):
+            for step in range(self.episode_length):
+                self.reset_choose = np.zeros(self.n_rollout_threads, dtype=bool)
+                finished_episodes += self._collect(step)
 
-        print(
-            f"[HanabiRunner] Starting rollout for up to {self.num_env_steps} environment steps "
-            f"with {self.n_rollout_threads} parallel env(s) over {num_updates} update(s)."
-        )
-
-        last_train_info = {}
-        for update in range(num_updates):
-            steps_collected = 0
-            while (
-                steps_collected < steps_per_update
-                and total_env_steps < self.num_env_steps
-            ):
-                self.agent.prep_rollout()
-
-                obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
-                share_tensor = torch.as_tensor(share_obs, dtype=torch.float32, device=self.device)
-                avail_tensor = torch.as_tensor(available_actions, dtype=torch.float32, device=self.device)
-
-                values, actions, action_log_probs = self.agent.get_actions(
-                    share_tensor, obs_tensor, avail_tensor
-                )
-                actions_np = actions.detach().cpu().numpy()
-
-                obs_next, share_next, rewards, dones, infos, available_next = self.envs.step(actions_np)
-
-                rewards_np = np.asarray(rewards, dtype=np.float32)[:, :1, :]
-                dones_np = np.asarray(dones, dtype=np.float32).reshape(
-                    self.n_rollout_threads, 1, 1
+                self.buffer.chooseinsert(
+                    self.turn_share_obs,
+                    self.turn_obs,
+                    self.turn_actions,
+                    self.turn_action_log_probs,
+                    self.turn_values,
+                    self.turn_rewards,
+                    self.turn_masks,
+                    active_masks=self.turn_active_masks,
+                    available_actions=self.turn_available_actions,
                 )
 
-                self.buffer.insert(
-                    obs=torch.as_tensor(obs, dtype=torch.float32).unsqueeze(1),
-                    cent_obs=torch.as_tensor(share_obs, dtype=torch.float32).unsqueeze(1),
-                    actions=actions.detach().cpu().long().unsqueeze(1),
-                    log_probs=action_log_probs.detach().cpu().unsqueeze(1),
-                    values=values.detach().cpu().unsqueeze(1),
-                    rewards=torch.as_tensor(rewards_np, dtype=torch.float32),
-                    dones=torch.as_tensor(dones_np, dtype=torch.float32),
-                    available_actions=torch.as_tensor(
-                        available_actions, dtype=torch.float32
-                    ).unsqueeze(1),
-                )
+                if self.reset_choose.any():
+                    reset_obs, reset_share, reset_available = self.envs.reset(
+                        self.reset_choose
+                    )
+                    reset_share = reset_share if self.use_centralized_V else reset_obs
+
+                    self.use_obs[self.reset_choose] = reset_obs[self.reset_choose]
+                    self.use_share_obs[self.reset_choose] = reset_share[self.reset_choose]
+                    self.use_available_actions[
+                        self.reset_choose
+                    ] = reset_available[self.reset_choose]
+                    self.env_live_mask[self.reset_choose] = True
+
+                self.buffer.share_obs[self.buffer.step] = self.use_share_obs.copy()
+                self.buffer.obs[self.buffer.step] = self.use_obs.copy()
+                if self.buffer.available_actions is not None:
+                    self.buffer.available_actions[self.buffer.step] = (
+                        self.use_available_actions.copy()
+                    )
 
                 total_env_steps += self.n_rollout_threads
-                steps_collected += 1
-
-                info_list = infos if isinstance(infos, (list, tuple)) else [infos] * self.n_rollout_threads
-                for info in info_list:
-                    if isinstance(info, dict) and "score" in info:
-                        self.last_score = info["score"]
-
-                obs = np.asarray(obs_next, dtype=np.float32)
-                share_obs = np.asarray(share_next, dtype=np.float32)
-                available_actions = np.asarray(available_next, dtype=np.float32)
-
-                done_mask = np.asarray(dones, dtype=bool).reshape(self.n_rollout_threads)
-                if done_mask.any():
-                    reset_obs, reset_share, reset_available = self._reset_envs(done_mask)
-                    reset_obs = np.asarray(reset_obs, dtype=np.float32)
-                    reset_share = np.asarray(reset_share, dtype=np.float32)
-                    reset_available = np.asarray(reset_available, dtype=np.float32)
-                    obs[done_mask] = reset_obs[done_mask]
-                    share_obs[done_mask] = reset_share[done_mask]
-                    available_actions[done_mask] = reset_available[done_mask]
-                    finished_episodes += int(done_mask.sum())
-
-            if self.buffer.ptr == 0:
-                break
 
             with torch.no_grad():
                 next_values = self.agent.get_values(
-                    torch.as_tensor(share_obs, dtype=torch.float32, device=self.device)
+                    torch.as_tensor(
+                        self.use_share_obs, dtype=torch.float32, device=self.device
+                    )
                 )
+            next_values = next_values.detach().cpu().numpy()
+            next_values = np.repeat(next_values[:, None, :], self.num_agents, axis=1)
             self.buffer.compute_returns_and_advantages(
-                next_values.detach().cpu().unsqueeze(1)
+                torch.as_tensor(next_values, dtype=torch.float32)
             )
 
             last_train_info = self.agent.train(self.buffer)
+
+            if self.buffer.ptr > 0:
+                actions_np = self.buffer.actions[: self.buffer.ptr].astype(np.int64).flatten()
+                counts = np.bincount(actions_np, minlength=self.act_dim)
+                top_actions = counts.argsort()[-3:][::-1]
+                debug_actions = [(int(a), int(counts[a])) for a in top_actions]
+                adv_tensor = self.buffer.advs[: self.buffer.ptr].cpu()
+                adv_mean = float(adv_tensor.mean().item())
+                adv_std = float(adv_tensor.std(unbiased=False).item())
+                print(
+                    f"[HanabiRunner][DEBUG] Action top-3 {debug_actions}, advantages mean={adv_mean:.4f}, std={adv_std:.4f}"
+                )
+
+            if self.episode_reward_history:
+                recent_rewards = self.episode_reward_history[-50:]
+                recent_lengths = self.episode_length_history[-50:] or [0]
+                print(
+                    "[HanabiRunner][DEBUG] Reward stats (last 50): mean={:.2f}, max={:.2f}, min={:.2f}; avg length={:.2f}".format(
+                        float(np.mean(recent_rewards)),
+                        float(np.max(recent_rewards)),
+                        float(np.min(recent_rewards)),
+                        float(np.mean(recent_lengths)),
+                    )
+                )
+
             self.buffer.after_update()
 
-            if total_env_steps >= self.num_env_steps:
-                break
+            if episode % self.log_interval == 0 and self.episode_scores:
+                mean_score = float(np.mean(self.episode_scores[-10:]))
+                print(
+                    f"[HanabiRunner] Episode {episode} mean score (last 10): {mean_score:.2f}"
+                )
 
         print(
-            f"[HanabiRunner] Completed {total_env_steps} environment steps across {finished_episodes} finished episode(s). "
-            f"Last observed score: {self.last_score}."
+            f"[HanabiRunner] Completed {total_env_steps} environment steps across {finished_episodes} episodes."
         )
-        if last_train_info:
-            print(
-                "[HanabiRunner] Training stats: "
-                + ", ".join(f"{k}={v:.4f}" for k, v in last_train_info.items())
+
+    def _collect(self, step: int) -> None:
+        self.turn_obs.fill(0.0)
+        self.turn_share_obs.fill(0.0)
+        self.turn_available_actions.fill(0.0)
+        self.turn_values.fill(0.0)
+        self.turn_actions.fill(0.0)
+        self.turn_action_log_probs.fill(0.0)
+        self.turn_masks.fill(0.0)
+        self.turn_active_masks.fill(0.0)
+        self.turn_rewards.fill(0.0)
+
+        finished_this_step = 0
+
+        for current_agent_id in range(self.num_agents):
+            env_actions = np.ones((self.n_rollout_threads, 1), dtype=np.float32) * (-1.0)
+            choose = self.env_live_mask & np.any(self.use_available_actions == 1, axis=1)
+
+            if not np.any(choose):
+                self.reset_choose[:] = True
+                break
+
+            self.agent.prep_rollout()
+            values, actions, action_log_probs = self.agent.get_actions(
+                torch.as_tensor(
+                    self.use_share_obs[choose],
+                    dtype=torch.float32,
+                    device=self.device,
+                ),
+                torch.as_tensor(
+                    self.use_obs[choose], dtype=torch.float32, device=self.device
+                ),
+                torch.as_tensor(
+                    self.use_available_actions[choose],
+                    dtype=torch.float32,
+                    device=self.device,
+                ),
             )
 
-        return {
-            "total_env_steps": total_env_steps,
-            "episodes_completed": finished_episodes,
-            "last_score": self.last_score,
-            "train_info": last_train_info,
-        }
+            values_np = values.detach().cpu().numpy().reshape(-1, 1)
+            actions_np = actions.detach().cpu().numpy().reshape(-1)
+            action_log_probs_np = action_log_probs.detach().cpu().numpy().reshape(-1, 1)
+
+            env_actions[choose, 0] = actions_np
+
+            self.turn_obs[choose, current_agent_id] = self.use_obs[choose].copy()
+            self.turn_share_obs[choose, current_agent_id] = self.use_share_obs[choose].copy()
+            self.turn_available_actions[choose, current_agent_id] = self.use_available_actions[choose].copy()
+            self.turn_values[choose, current_agent_id, 0] = values_np[:, 0]
+            self.turn_actions[choose, current_agent_id, 0] = actions_np
+            self.turn_action_log_probs[choose, current_agent_id, 0] = action_log_probs_np[:, 0]
+            self.turn_masks[choose, current_agent_id, 0] = 1.0
+            self.turn_active_masks[choose, current_agent_id, 0] = 1.0
+
+            obs, share_obs, rewards, dones, infos, available_actions = self.envs.step(env_actions.astype(np.int32))
+            share_obs = share_obs if self.use_centralized_V else obs
+
+            rewards = np.asarray(rewards, dtype=np.float32)
+            env_reward = rewards.reshape(self.n_rollout_threads, -1).sum(axis=1)
+            self.current_episode_reward[choose] += env_reward[choose]
+            self.current_episode_length[choose] += 1
+            self.turn_rewards[choose, current_agent_id] = (
+                self.turn_rewards_since_last_action[choose, current_agent_id].copy()
+            )
+            self.turn_rewards_since_last_action[choose, current_agent_id] = 0.0
+            self.turn_rewards_since_last_action[choose] += rewards[choose]
+
+            dones = np.asarray(dones, dtype=bool)
+            if dones.any():
+                self.reset_choose[dones] = True
+                self.turn_masks[dones] = 0.0
+                self.turn_active_masks[dones] = 0.0
+                self.turn_active_masks[dones, current_agent_id, 0] = 1.0
+                self.env_live_mask[dones] = False
+
+                left_agent_id = current_agent_id + 1
+                if left_agent_id < self.num_agents:
+                    self.turn_active_masks[dones, left_agent_id:, 0] = 0.0
+                    self.turn_rewards[dones, left_agent_id:] = (
+                        self.turn_rewards_since_last_action[dones, left_agent_id:]
+                    )
+                    self.turn_rewards_since_last_action[dones, left_agent_id:] = 0.0
+                    self.turn_values[dones, left_agent_id:] = 0.0
+                    self.turn_obs[dones, left_agent_id:] = 0.0
+                    self.turn_share_obs[dones, left_agent_id:] = 0.0
+                    self.turn_available_actions[dones, left_agent_id:] = 0.0
+
+            info_list = (
+                infos.tolist()
+                if isinstance(infos, np.ndarray)
+                else list(infos)
+                if isinstance(infos, (list, tuple))
+                else [infos] * self.n_rollout_threads
+            )
+            for env_idx, done_flag in enumerate(dones):
+                if done_flag:
+                    info = (
+                        info_list[env_idx]
+                        if env_idx < len(info_list)
+                        else info_list[-1]
+                    )
+                    if isinstance(info, dict) and "score" in info:
+                        self.episode_scores.append(info["score"])
+                    self.episode_reward_history.append(float(self.current_episode_reward[env_idx]))
+                    self.episode_length_history.append(int(self.current_episode_length[env_idx]))
+                    self.current_episode_reward[env_idx] = 0.0
+                    self.current_episode_length[env_idx] = 0
+                    finished_this_step += 1
+
+            self.use_obs = obs.copy()
+            self.use_share_obs = share_obs.copy()
+            self.use_available_actions = available_actions.copy()
+
+        return finished_this_step
 
 
 if __name__ == "__main__":

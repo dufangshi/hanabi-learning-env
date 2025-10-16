@@ -9,6 +9,7 @@ class HanabiConfig:
     n_eval_rollout_threads: int
     num_env_steps: int
     hanabi_name: str
+    hanabi_mode: str
     num_agents: int
     use_obs_instead_of_state: bool
     episode_length: int
@@ -60,6 +61,13 @@ def get_config() -> HanabiConfig:
 
     # env parameters
     parser.add_argument("--hanabi_name", type=str, default="Hanabi-Full-Minimal")  # choice details can be seen at ~/third_party/hanabi/Hanabi_Env.py
+    parser.add_argument(
+        "--hanabi_mode",
+        type=str,
+        choices=["minimal", "full", "full-minimal", "small", "very-small"],
+        default="minimal",
+        help="Shortcut for common Hanabi variants (maps to hanabi_name).",
+    )
     parser.add_argument("--num_agents", type=int, default=2)
     parser.add_argument("--use_obs_instead_of_state", action='store_true', default=False, help="Whether to use global state or concatenated obs")
 
@@ -121,4 +129,13 @@ def get_config() -> HanabiConfig:
     args = parser.parse_args()  #TODO might need to change to parser.parse_known_args() if using framework that adds its own unknown args e.g. wandb
     if args.clip_epsilon is None:
         args.clip_epsilon = args.clip_param
+
+    mode_to_name = {
+        "minimal": "Hanabi-Very-Small",
+        "full": "Hanabi-Full",
+        "full-minimal": "Hanabi-Full-Minimal",
+        "small": "Hanabi-Small",
+        "very-small": "Hanabi-Very-Small",
+    }
+    args.hanabi_name = mode_to_name.get(args.hanabi_mode, args.hanabi_name)
     return HanabiConfig(**vars(args))

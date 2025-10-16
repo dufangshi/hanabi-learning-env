@@ -163,6 +163,7 @@ class MAPPOAgent:
         if update_actor:
             # new_log_probs, entropy = self.actor.evaluate_actions(obs, action, available_actions) TODO
             new_log_probs, entropy = self.actor.evaluate_actions(obs, actions, available_actions)
+            approx_kl = (old_log_probs - new_log_probs).mean()
             ratio = torch.exp(new_log_probs - old_log_probs)
 
             surr1 = ratio * advs
@@ -185,22 +186,25 @@ class MAPPOAgent:
         if update_actor:
             self.actor_optimizer.zero_grad(set_to_none=True)
             (policy_loss + self.entropy_coef * entropy_loss).backward()
-            nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+            actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             self.actor_optimizer.step()
 
             stats.update({
                 "policy_loss": float(policy_loss.detach().cpu()),
                 "entropy": float(entropy.mean().detach().cpu()) if entropy is not None else 0.0,
+                "kl": float(approx_kl.detach().cpu()),
+                "grad_norm_actor": float(actor_grad_norm),
             })
 
         self.critic_optimizer.zero_grad(set_to_none=True)
         (self.value_loss_coef * value_loss).backward()
-        nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+        critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         self.critic_optimizer.step()
 
         stats.update({
             "value_loss": float(value_loss.detach().cpu()),
-            "value_pred_mean": float(values.mean().detach().cpu())
+            "value_pred_mean": float(values.mean().detach().cpu()),
+            "grad_norm_critic": float(critic_grad_norm),
         })
         return stats
     
@@ -231,6 +235,9 @@ class MAPPOAgent:
             "policy_loss": 0.0,
             "dist_entropy": 0.0,
             "value_pred_mean": 0.0,
+            "kl": 0.0,
+            "grad_norm_actor": 0.0,
+            "grad_norm_critic": 0.0,
         }
         updates = 0
 
@@ -244,6 +251,9 @@ class MAPPOAgent:
                 train_info["policy_loss"]     += stats.get("policy_loss", 0.0)
                 train_info["dist_entropy"]    += stats.get("entropy", 0.0)
                 train_info["value_pred_mean"] += stats.get("value_pred_mean", 0.0)
+                train_info["kl"]              += stats.get("kl", 0.0)
+                train_info["grad_norm_actor"] += stats.get("grad_norm_actor", 0.0)
+                train_info["grad_norm_critic"]+= stats.get("grad_norm_critic", 0.0)
                 updates += 1
 
         if updates > 0:
