@@ -119,26 +119,45 @@ class ActionLayer(nn.Module):
         super(ActionLayer, self).__init__()
         action_dim = action_space.n
         self.linear = init_(nn.Linear(inputs_dim, action_dim))
+        self._large_neg = -1e10
     
     def forward(self, x, available_actions=None, deterministic=False):
-        x = self.linear(x)
-
-        if available_actions is not None:
-            if available_actions.dim() == 1:
-                available_actions = available_actions.unsqueeze(0)
-            x[available_actions == 0] = -1e10
-        logits = FixedCategorical(logits=x)
-        actions = logits.sample() 
-        action_log_probs = logits.log_probs(actions)
+        logits = self.linear(x)
+        logits = self._mask_logits(logits, available_actions)
+        dist = FixedCategorical(logits=logits)
+        actions = dist.mode() if deterministic else dist.sample()
+        action_log_probs = dist.log_probs(actions)
         return actions, action_log_probs
 
     def get_probs(self, x, available_actions=None):
-        #TODO: implement 
-        pass 
+        logits = self.linear(x)
+        logits = self._mask_logits(logits, available_actions)
+        return torch.softmax(logits, dim=-1)
 
     def evaluate_actions(self, x, action, available_actions=None, active_masks=None):
-        #TODO: implement 
-        pass 
+        if action.dim() == 1:
+            action = action.unsqueeze(-1)
+        logits = self.linear(x)
+        logits = self._mask_logits(logits, available_actions)
+        dist = FixedCategorical(logits=logits)
+        log_probs = dist.log_probs(action)
+        entropy = dist.entropy().unsqueeze(-1)
+        return log_probs, entropy
+
+    def _mask_logits(self, logits, available_actions):
+        if available_actions is None:
+            return logits
+        if isinstance(available_actions, np.ndarray):
+            available_actions = torch.from_numpy(available_actions)
+        available_actions = available_actions.to(device=logits.device, dtype=torch.float32)
+        if available_actions.dim() == 1:
+            available_actions = available_actions.unsqueeze(0)
+        if available_actions.shape != logits.shape:
+            available_actions = available_actions.expand_as(logits)
+        mask = available_actions <= 0
+        if mask.any():
+            logits = logits.masked_fill(mask, self._large_neg)
+        return logits
     
 # Should be similar to R_Actor class in https://github.com/zoeyuchao/mappo/blob/79f6591882088a0f583f7a4bcba44041141f25f5/onpolicy/algorithms/r_mappo/algorithm/r_actor_critic.py
 class ActorNetwork(nn.Module):
@@ -157,12 +176,25 @@ class ActorNetwork(nn.Module):
             available_actions = check(available_actions).to(device=next(self.parameters()).device, dtype=torch.float32)
 
         actor_features = self.mlp(obs)
-        actions, action_log_probs = self.act(actor_features, available_actions)
+        actions, action_log_probs = self.act(actor_features, available_actions, deterministic=deterministic)
 
         return actions, action_log_probs
-    def evaluate_actions(self, obs, action, masks, available_actions=None, active_masks=None):
-        #TODO: implement. Notice that rnn_states is removed since it is unneeded 
-        pass 
+    def evaluate_actions(self, obs, action, available_actions=None, active_masks=None):
+        if isinstance(obs, np.ndarray):
+            obs = torch.from_numpy(obs)
+        obs = obs.to(device=next(self.parameters()).device, dtype=torch.float32)
+
+        if action is not None and isinstance(action, np.ndarray):
+            action = torch.from_numpy(action)
+        action = action.to(device=next(self.parameters()).device, dtype=torch.long)
+
+        if available_actions is not None:
+            available_actions = check(available_actions).to(
+                device=next(self.parameters()).device, dtype=torch.float32
+            )
+
+        actor_features = self.mlp(obs)
+        return self.act.evaluate_actions(actor_features, action, available_actions, active_masks)
 # Should be similar to R_Critic class in https://github.com/zoeyuchao/mappo/blob/79f6591882088a0f583f7a4bcba44041141f25f5/onpolicy/algorithms/r_mappo/algorithm/r_actor_critic.py
 class CriticNetwork(nn.Module):
     def __init__(self, args, cent_obs_space, device=torch.device("cpu")):
