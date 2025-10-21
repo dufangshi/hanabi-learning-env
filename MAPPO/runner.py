@@ -216,8 +216,12 @@ class HanabiRunner:
         self.use_share_obs = share_obs.copy()
         self.use_available_actions = available_actions.copy()
 
-        self.buffer.share_obs[0] = share_obs.copy()
-        self.buffer.obs[0] = obs.copy()
+        obs_expanded = np.tile(obs[:, np.newaxis, :], (1, self.num_agents, 1))
+        share_obs_expanded = np.tile(share_obs[:, np.newaxis, :], (1, self.num_agents, 1))
+        available_actions_expanded = np.tile(available_actions[:, np.newaxis, :], (1, self.num_agents, 1))
+
+        self.buffer.share_obs[0] = share_obs_expanded.copy()
+        self.buffer.obs[0] = obs_expanded.copy()
         self.buffer.value_preds[0] = np.zeros(
             (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
         )
@@ -225,7 +229,7 @@ class HanabiRunner:
             (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
         )
         if self.buffer.available_actions is not None:
-            self.buffer.available_actions[0] = available_actions.copy()
+            self.buffer.available_actions[0] = available_actions_expanded.copy()
         self.env_live_mask[:] = True
         self.current_episode_reward.fill(0.0)
         self.current_episode_length.fill(0)
@@ -273,12 +277,14 @@ class HanabiRunner:
                     ] = reset_available[self.reset_choose]
                     self.env_live_mask[self.reset_choose] = True
 
-                self.buffer.share_obs[self.buffer.step] = self.use_share_obs.copy()
-                self.buffer.obs[self.buffer.step] = self.use_obs.copy()
+                obs_expanded = np.tile(self.use_obs[:, np.newaxis, :], (1, self.num_agents, 1))
+                share_obs_expanded = np.tile(self.use_share_obs[:, np.newaxis, :], (1, self.num_agents, 1))
+                available_actions_expanded = np.tile(self.use_available_actions[:, np.newaxis, :], (1, self.num_agents, 1))
+
+                self.buffer.share_obs[self.buffer.step] = share_obs_expanded.copy()
+                self.buffer.obs[self.buffer.step] = obs_expanded.copy()
                 if self.buffer.available_actions is not None:
-                    self.buffer.available_actions[self.buffer.step] = (
-                        self.use_available_actions.copy()
-                    )
+                    self.buffer.available_actions[self.buffer.step] = available_actions_expanded.copy()
 
                 total_env_steps += self.n_rollout_threads
 
