@@ -3,6 +3,7 @@ Hanabi MAPPO runner with per-agent turn-based data collection.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -128,6 +129,9 @@ class HanabiRunner:
         self.use_centralized_V = True
         self.true_total_num_steps = 0
 
+        # Setup save directories
+        self._setup_directories()
+
         try:
             from .agent import MAPPOAgent
         except ImportError:  # pragma: no cover
@@ -144,6 +148,10 @@ class HanabiRunner:
             act_space=act_space,
             device=self.device,
         )
+
+        # Load pretrained model if specified
+        if self.all_args.model_dir is not None:
+            self.restore(self.all_args.model_dir)
 
         obs_shape = tuple(get_shape_from_obs_space(obs_space))
         share_obs_shape = tuple(get_shape_from_obs_space(shared_obs_space))
@@ -173,6 +181,30 @@ class HanabiRunner:
         self.current_episode_length = np.zeros(self.n_rollout_threads, dtype=np.int32)
         self.episode_reward_history: list[float] = []
         self.episode_length_history: list[int] = []
+
+    def _setup_directories(self):
+        """Create directory structure for saving models and logs."""
+        # Create run directory: results/Hanabi/{hanabi_name}/{algorithm_name}/{experiment_name}/run{N}/
+        base_dir = Path(self.all_args.result_dir) / "Hanabi" / self.hanabi_name / self.algorithm_name / self.experiment_name
+
+        if not base_dir.exists():
+            run_id = 1
+        else:
+            # Find existing run directories
+            existing_runs = [int(d.name.replace("run", "")) for d in base_dir.iterdir()
+                           if d.is_dir() and d.name.startswith("run") and d.name.replace("run", "").isdigit()]
+            run_id = max(existing_runs) + 1 if existing_runs else 1
+
+        self.run_dir = base_dir / f"run{run_id}"
+        self.save_dir = self.run_dir / "models"
+        self.log_dir = self.run_dir / "logs"
+
+        # Create directories
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"[HanabiRunner] Saving models to: {self.save_dir}")
+        print(f"[HanabiRunner] Saving logs to: {self.log_dir}")
 
     def _init_turn_buffers(self, obs_shape, share_obs_shape, act_dim):
         self.turn_obs = np.zeros(
@@ -233,6 +265,68 @@ class HanabiRunner:
         self.env_live_mask[:] = True
         self.current_episode_reward.fill(0.0)
         self.current_episode_length.fill(0)
+
+    def save(self, episode=0):
+        """Save actor and critic networks along with training state."""
+        save_path_actor = self.save_dir / f"actor_ep{episode}.pt"
+        save_path_critic = self.save_dir / f"critic_ep{episode}.pt"
+        save_path_checkpoint = self.save_dir / f"checkpoint_ep{episode}.pt"
+
+        # Save actor and critic networks
+        torch.save(self.agent.actor.state_dict(), str(save_path_actor))
+        torch.save(self.agent.critic.state_dict(), str(save_path_critic))
+
+        # Save training state
+        checkpoint = {
+            'episode': episode,
+            'episode_scores': self.episode_scores,
+            'episode_reward_history': self.episode_reward_history,
+            'episode_length_history': self.episode_length_history,
+        }
+        torch.save(checkpoint, str(save_path_checkpoint))
+
+        print(f"[HanabiRunner] Saved model at episode {episode} to {self.save_dir}")
+
+        # Also save as latest for easy resuming
+        torch.save(self.agent.actor.state_dict(), str(self.save_dir / "actor_latest.pt"))
+        torch.save(self.agent.critic.state_dict(), str(self.save_dir / "critic_latest.pt"))
+        torch.save(checkpoint, str(self.save_dir / "checkpoint_latest.pt"))
+
+    def restore(self, model_dir):
+        """Restore actor and critic networks from saved model."""
+        model_path = Path(model_dir)
+
+        # Try to load latest models first, then fall back to specific episode
+        actor_path = model_path / "actor_latest.pt"
+        critic_path = model_path / "critic_latest.pt"
+        checkpoint_path = model_path / "checkpoint_latest.pt"
+
+        if not actor_path.exists():
+            # Try to find the latest episode checkpoint
+            actor_files = list(model_path.glob("actor_ep*.pt"))
+            if not actor_files:
+                raise FileNotFoundError(f"No actor model found in {model_dir}")
+            # Sort by episode number
+            actor_path = sorted(actor_files, key=lambda p: int(p.stem.split("_ep")[-1]))[-1]
+            episode_num = int(actor_path.stem.split("_ep")[-1])
+            critic_path = model_path / f"critic_ep{episode_num}.pt"
+            checkpoint_path = model_path / f"checkpoint_ep{episode_num}.pt"
+
+        print(f"[HanabiRunner] Loading model from {actor_path}")
+
+        # Load networks
+        self.agent.actor.load_state_dict(torch.load(str(actor_path), map_location=self.device))
+        self.agent.critic.load_state_dict(torch.load(str(critic_path), map_location=self.device))
+
+        # Load training state if available
+        if checkpoint_path.exists():
+            checkpoint = torch.load(str(checkpoint_path), map_location=self.device)
+            self.episode_scores = checkpoint.get('episode_scores', [])
+            self.episode_reward_history = checkpoint.get('episode_reward_history', [])
+            self.episode_length_history = checkpoint.get('episode_length_history', [])
+            print(f"[HanabiRunner] Resumed from episode {checkpoint.get('episode', 0)}")
+        else:
+            print("[HanabiRunner] No checkpoint file found, starting fresh training state")
 
     def run(self):
         if self.envs is None:
@@ -334,6 +428,12 @@ class HanabiRunner:
                     f"[HanabiRunner] Episode {episode} mean score (last 10): {mean_score:.2f}"
                 )
 
+            # Save model periodically
+            if episode % self.save_interval == 0:
+                self.save(episode)
+
+        # Save final model
+        self.save(episodes)
         print(
             f"[HanabiRunner] Completed {total_env_steps} environment steps across {finished_episodes} episodes."
         )

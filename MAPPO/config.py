@@ -35,6 +35,8 @@ class HanabiConfig:
     opti_eps: float
     weight_decay: float
     save_interval: int
+    model_dir: str
+    result_dir: str
     log_interval: int
     use_eval: bool
     eval_interval: int
@@ -117,7 +119,9 @@ def get_config() -> HanabiConfig:
                         help="optional L2 weight decay.")
 
     # save parameters
-    parser.add_argument("--save_interval", type=int, default=1, help="time duration between contiunous twice models saving.")
+    parser.add_argument("--save_interval", type=int, default=1000, help="save model every N episodes (default: 1000)")
+    parser.add_argument("--model_dir", type=str, default=None, help="directory to load pretrained models for resuming training.")
+    parser.add_argument("--result_dir", type=str, default="./results", help="root directory to save training results.")
 
     # log parameters
     parser.add_argument("--log_interval", type=int, default=5, help="time duration between continuous twice log printing.")
