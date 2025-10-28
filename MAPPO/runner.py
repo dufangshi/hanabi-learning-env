@@ -11,6 +11,11 @@ from typing import Iterable, Optional
 import numpy as np
 import torch
 
+import logging
+from datetime import datetime
+
+import csv
+
 try:
     from .config import HanabiConfig, get_config
     from .envwrappers import ChooseDummyVecEnv, ChooseSubprocVecEnv
@@ -40,6 +45,36 @@ except ImportError as exc:  # pragma: no cover
 else:
     _PYHANABI_IMPORT_ERROR = None
 
+def setup_logger(log_dir: Path, name: str = "hanabi") -> logging.Logger:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = log_dir / f"{name}_{ts}.log"
+
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    # Avoid adding multiple handlers if re-run in the same process
+    if logger.handlers:
+        return logger
+
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+    fh = logging.FileHandler(log_path)
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+    ch = logging.StreamHandler()   # also show in console
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
+
+    logger.info(f"Logging to {log_path}")
+    return logger
+
+def _tile_agents(x: np.ndarray, n_agents: int):
+    # x: (n_envs, ... ) -> (n_envs, n_agents, ... )
+    return np.repeat(x[:, None, ...], n_agents, axis=1)
 
 def _ensure_pyhanabi_loaded() -> None:
     if pyhanabi is None or HanabiEnv is None:
@@ -173,6 +208,24 @@ class HanabiRunner:
         self.current_episode_length = np.zeros(self.n_rollout_threads, dtype=np.int32)
         self.episode_reward_history: list[float] = []
         self.episode_length_history: list[int] = []
+        
+        # game log/ metrics
+        self.log_dir = Path(getattr(self.all_args, "log_dir", "logs"))
+        self.log = setup_logger(self.log_dir, name="hanabi")
+        
+        self.metrics_path = self.log_dir / "metrics.csv"
+        self.metrics_fp = open(self.metrics_path, "a", newline="")
+        self.metrics_csv = csv.writer(self.metrics_fp)
+
+        # write header only if file is empty
+        if self.metrics_path.stat().st_size == 0:
+            self.metrics_csv.writerow([
+                "episode","total_env_steps",
+                "mean_score_last10",
+                "reward_mean_last50","reward_max_last50","reward_min_last50","avg_len_last50",
+                "adv_mean","adv_std"
+            ])
+            self.metrics_fp.flush()
 
     def _init_turn_buffers(self, obs_shape, share_obs_shape, act_dim):
         self.turn_obs = np.zeros(
@@ -216,8 +269,13 @@ class HanabiRunner:
         self.use_share_obs = share_obs.copy()
         self.use_available_actions = available_actions.copy()
 
-        self.buffer.share_obs[0] = share_obs.copy()
-        self.buffer.obs[0] = obs.copy()
+        # Tile across agents when writing into the buffer
+        obs_b  = _tile_agents(obs, self.num_agents)                       # (n_envs, n_agents, obs_dim)
+        share_b = _tile_agents(share_obs, self.num_agents)                # (n_envs, n_agents, cent_obs_dim)
+        avail_b = _tile_agents(available_actions, self.num_agents)        # (n_envs, n_agents, act_dim)
+    
+        self.buffer.share_obs[0] = share_b
+        self.buffer.obs[0] = obs_b
         self.buffer.value_preds[0] = np.zeros(
             (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
         )
@@ -225,7 +283,7 @@ class HanabiRunner:
             (self.n_rollout_threads, self.num_agents, 1), dtype=np.float32
         )
         if self.buffer.available_actions is not None:
-            self.buffer.available_actions[0] = available_actions.copy()
+            self.buffer.available_actions[0] = avail_b
         self.env_live_mask[:] = True
         self.current_episode_reward.fill(0.0)
         self.current_episode_length.fill(0)
@@ -273,12 +331,16 @@ class HanabiRunner:
                     ] = reset_available[self.reset_choose]
                     self.env_live_mask[self.reset_choose] = True
 
-                self.buffer.share_obs[self.buffer.step] = self.use_share_obs.copy()
-                self.buffer.obs[self.buffer.step] = self.use_obs.copy()
+                # self.buffer.share_obs[self.buffer.step] = self.use_share_obs.copy()
+                # self.buffer.obs[self.buffer.step] = self.use_obs.copy()
+                
+                share_b = _tile_agents(self.use_share_obs, self.num_agents)
+                obs_b   = _tile_agents(self.use_obs, self.num_agents)    
+                self.buffer.share_obs[self.buffer.step] = share_b
+                self.buffer.obs[self.buffer.step] = obs_b
                 if self.buffer.available_actions is not None:
-                    self.buffer.available_actions[self.buffer.step] = (
-                        self.use_available_actions.copy()
-                    )
+                    avail_b = _tile_agents(self.use_available_actions, self.num_agents)
+                    self.buffer.available_actions[self.buffer.step] = avail_b
 
                 total_env_steps += self.n_rollout_threads
 
@@ -304,14 +366,23 @@ class HanabiRunner:
                 adv_tensor = self.buffer.advs[: self.buffer.ptr].cpu()
                 adv_mean = float(adv_tensor.mean().item())
                 adv_std = float(adv_tensor.std(unbiased=False).item())
-                print(
-                    f"[HanabiRunner][DEBUG] Action top-3 {debug_actions}, advantages mean={adv_mean:.4f}, std={adv_std:.4f}"
-                )
+                # print(
+                #     f"[HanabiRunner][DEBUG] Action top-3 {debug_actions}, advantages mean={adv_mean:.4f}, std={adv_std:.4f}"
+                # )
+                self.log.info(f"[HanabiRunner][DEBUG] Action top-3 {debug_actions}, advantages mean={adv_mean:.4f}, std={adv_std:.4f}")
 
             if self.episode_reward_history:
                 recent_rewards = self.episode_reward_history[-50:]
                 recent_lengths = self.episode_length_history[-50:] or [0]
-                print(
+                # print(
+                #     "[HanabiRunner][DEBUG] Reward stats (last 50): mean={:.2f}, max={:.2f}, min={:.2f}; avg length={:.2f}".format(
+                #         float(np.mean(recent_rewards)),
+                #         float(np.max(recent_rewards)),
+                #         float(np.min(recent_rewards)),
+                #         float(np.mean(recent_lengths)),
+                #     )
+                # )
+                self.log.info(
                     "[HanabiRunner][DEBUG] Reward stats (last 50): mean={:.2f}, max={:.2f}, min={:.2f}; avg length={:.2f}".format(
                         float(np.mean(recent_rewards)),
                         float(np.max(recent_rewards)),
@@ -320,17 +391,58 @@ class HanabiRunner:
                     )
                 )
 
+            # === Append metrics row ===
+            # mean score over last 10 finished episodes (authoritative 0–5 for 1-color)
+            mean_score = float(np.mean(self.episode_scores[-10:])) if self.episode_scores else 0.0
+
+            # advantage stats
+            if self.buffer.ptr > 0:
+                adv_tensor = self.buffer.advs[: self.buffer.ptr].cpu()
+                adv_mean = float(adv_tensor.mean().item())
+                adv_std  = float(adv_tensor.std(unbiased=False).item())
+            else:
+                adv_mean = adv_std = 0.0
+
+            # reward/length stats (these are your debug aggregates; may be agent-summed)
+            if self.episode_reward_history:
+                recent_rewards = self.episode_reward_history[-50:]
+                recent_lengths = self.episode_length_history[-50:] or [0]
+                r_mean = float(np.mean(recent_rewards))
+                r_max  = float(np.max(recent_rewards))
+                r_min  = float(np.min(recent_rewards))
+                l_mean = float(np.mean(recent_lengths))
+            else:
+                r_mean = r_max = r_min = l_mean = 0.0
+
+            # write a CSV row (episode-level)
+            self.metrics_csv.writerow([
+                int(episode), int(total_env_steps),
+                mean_score,
+                r_mean, r_max, r_min, l_mean,
+                adv_mean, adv_std
+            ])
+            self.metrics_fp.flush()
+            # === end append metrics ===
             self.buffer.after_update()
 
             if episode % self.log_interval == 0 and self.episode_scores:
                 mean_score = float(np.mean(self.episode_scores[-10:]))
-                print(
+                # print(
+                #     f"[HanabiRunner] Episode {episode} mean score (last 10): {mean_score:.2f}"
+                # )
+                self.log.info(
                     f"[HanabiRunner] Episode {episode} mean score (last 10): {mean_score:.2f}"
                 )
 
-        print(
+        # print(
+        #     f"[HanabiRunner] Completed {total_env_steps} environment steps across {finished_episodes} episodes."
+        # )
+        self.log.info(
             f"[HanabiRunner] Completed {total_env_steps} environment steps across {finished_episodes} episodes."
         )
+        
+        self.metrics_fp.close()
+        
 
     def _collect(self, step: int) -> None:
         self.turn_obs.fill(0.0)
