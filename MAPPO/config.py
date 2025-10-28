@@ -52,7 +52,7 @@ def get_config() -> HanabiConfig:
     # prepare parameters
     parser.add_argument("--algorithm_name", type=str, default='mappo')
     parser.add_argument("--experiment_name", type=str, default="check", help="an identifier to distinguish different experiment.")
-    parser.add_argument("--n_rollout_threads", type=int, default=32,
+    parser.add_argument("--n_rollout_threads", type=int, default=512,
                         help="Number of parallel envs for training rollouts")
     parser.add_argument("--n_eval_rollout_threads", type=int, default=1,
                         help="Number of parallel envs for evaluating rollouts")
@@ -76,11 +76,11 @@ def get_config() -> HanabiConfig:
                         default=200, help="Max length for any episode")
 
     # network parameters
-    parser.add_argument("--hidden_layer_dim", type=int, default=64) 
+    parser.add_argument("--hidden_layer_dim", type=int, default=128) 
     parser.add_argument("--use_feature_normalization", type=bool, default=False) 
     parser.add_argument("--use_orthogonal", type=int, default=1) 
     parser.add_argument("--use_ReLU", type=bool, default=True) 
-    parser.add_argument("--layer_N", type=int, default=1)
+    parser.add_argument("--layer_N", type=int, default=2)
 
     # ppo parameters
     parser.add_argument("--clip_param", type=float, default=0.2,
