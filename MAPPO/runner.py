@@ -3,8 +3,10 @@ Hanabi MAPPO runner with per-agent turn-based data collection.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -163,6 +165,9 @@ class HanabiRunner:
         self.use_centralized_V = True
         self.true_total_num_steps = 0
 
+        # Setup save directories
+        self._setup_directories()
+
         try:
             from .agent import MAPPOAgent
         except ImportError:  # pragma: no cover
@@ -179,6 +184,10 @@ class HanabiRunner:
             act_space=act_space,
             device=self.device,
         )
+
+        # Load pretrained model if specified
+        if self.all_args.model_dir is not None:
+            self.restore(self.all_args.model_dir)
 
         obs_shape = tuple(get_shape_from_obs_space(obs_space))
         share_obs_shape = tuple(get_shape_from_obs_space(shared_obs_space))
@@ -205,8 +214,10 @@ class HanabiRunner:
         self.episode_scores: list[float] = []
         self.env_live_mask = np.ones(self.n_rollout_threads, dtype=bool)
         self.current_episode_reward = np.zeros(self.n_rollout_threads, dtype=np.float32)
+        self.current_episode_positive_reward = np.zeros(self.n_rollout_threads, dtype=np.float32)
         self.current_episode_length = np.zeros(self.n_rollout_threads, dtype=np.int32)
         self.episode_reward_history: list[float] = []
+        self.episode_positive_reward_history: list[float] = []
         self.episode_length_history: list[int] = []
         
         # game log/ metrics
@@ -220,12 +231,36 @@ class HanabiRunner:
         # write header only if file is empty
         if self.metrics_path.stat().st_size == 0:
             self.metrics_csv.writerow([
-                "episode","total_env_steps",
+                "iteration","total_env_steps",
                 "mean_score_last10",
                 "reward_mean_last50","reward_max_last50","reward_min_last50","avg_len_last50",
                 "adv_mean","adv_std"
             ])
             self.metrics_fp.flush()
+
+    def _setup_directories(self):
+        """Create directory structure for saving models and logs."""
+        # Create run directory: results/Hanabi/{hanabi_name}/{algorithm_name}/{experiment_name}/run{N}/
+        base_dir = Path(self.all_args.result_dir) / "Hanabi" / self.hanabi_name / self.algorithm_name / self.experiment_name
+
+        if not base_dir.exists():
+            run_id = 1
+        else:
+            # Find existing run directories
+            existing_runs = [int(d.name.replace("run", "")) for d in base_dir.iterdir()
+                           if d.is_dir() and d.name.startswith("run") and d.name.replace("run", "").isdigit()]
+            run_id = max(existing_runs) + 1 if existing_runs else 1
+
+        self.run_dir = base_dir / f"run{run_id}"
+        self.save_dir = self.run_dir / "models"
+        self.log_dir = self.run_dir / "logs"
+
+        # Create directories
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"[HanabiRunner] Saving models to: {self.save_dir}")
+        print(f"[HanabiRunner] Saving logs to: {self.log_dir}")
 
     def _init_turn_buffers(self, obs_shape, share_obs_shape, act_dim):
         self.turn_obs = np.zeros(
@@ -288,20 +323,325 @@ class HanabiRunner:
         self.current_episode_reward.fill(0.0)
         self.current_episode_length.fill(0)
 
+    def save(self, iteration=0):
+        """Save actor and critic networks along with training state."""
+        save_path_actor = self.save_dir / f"actor_iter{iteration}.pt"
+        save_path_critic = self.save_dir / f"critic_iter{iteration}.pt"
+        save_path_checkpoint = self.save_dir / f"checkpoint_iter{iteration}.pt"
+
+        # Save actor and critic networks
+        torch.save(self.agent.actor.state_dict(), str(save_path_actor))
+        torch.save(self.agent.critic.state_dict(), str(save_path_critic))
+
+        # Save training state
+        checkpoint = {
+            'iteration': iteration,
+            'episode_scores': self.episode_scores,
+            'episode_reward_history': self.episode_reward_history,
+            'episode_length_history': self.episode_length_history,
+        }
+        torch.save(checkpoint, str(save_path_checkpoint))
+
+        print(f"[HanabiRunner] Saved model at iteration {iteration} to {self.save_dir}")
+
+        # Also save as latest for easy resuming
+        torch.save(self.agent.actor.state_dict(), str(self.save_dir / "actor_latest.pt"))
+        torch.save(self.agent.critic.state_dict(), str(self.save_dir / "critic_latest.pt"))
+        torch.save(checkpoint, str(self.save_dir / "checkpoint_latest.pt"))
+
+    def restore(self, model_dir):
+        """Restore actor and critic networks from saved model."""
+        model_path = Path(model_dir)
+
+        # Try to load latest models first, then fall back to specific iteration
+        actor_path = model_path / "actor_latest.pt"
+        critic_path = model_path / "critic_latest.pt"
+        checkpoint_path = model_path / "checkpoint_latest.pt"
+
+        if not actor_path.exists():
+            # Try to find the latest iteration checkpoint (support both old 'ep' and new 'iter' naming)
+            actor_files = list(model_path.glob("actor_iter*.pt")) + list(model_path.glob("actor_ep*.pt"))
+            if not actor_files:
+                raise FileNotFoundError(f"No actor model found in {model_dir}")
+            # Sort by iteration/episode number
+            def extract_num(p):
+                stem = p.stem
+                if "_iter" in stem:
+                    return int(stem.split("_iter")[-1])
+                else:
+                    return int(stem.split("_ep")[-1])
+            actor_path = sorted(actor_files, key=extract_num)[-1]
+            iter_num = extract_num(actor_path)
+
+            # Check which naming convention to use
+            if "_iter" in actor_path.stem:
+                critic_path = model_path / f"critic_iter{iter_num}.pt"
+                checkpoint_path = model_path / f"checkpoint_iter{iter_num}.pt"
+            else:
+                critic_path = model_path / f"critic_ep{iter_num}.pt"
+                checkpoint_path = model_path / f"checkpoint_ep{iter_num}.pt"
+
+        print(f"[HanabiRunner] Loading model from {actor_path}")
+
+        # Load networks
+        self.agent.actor.load_state_dict(torch.load(str(actor_path), map_location=self.device))
+        self.agent.critic.load_state_dict(torch.load(str(critic_path), map_location=self.device))
+
+        # Load training state if available
+        if checkpoint_path.exists():
+            checkpoint = torch.load(str(checkpoint_path), map_location=self.device)
+            self.episode_scores = checkpoint.get('episode_scores', [])
+            self.episode_reward_history = checkpoint.get('episode_reward_history', [])
+            self.episode_length_history = checkpoint.get('episode_length_history', [])
+            # Support both old 'episode' and new 'iteration' keys
+            iter_or_ep = checkpoint.get('iteration', checkpoint.get('episode', 0))
+            print(f"[HanabiRunner] Resumed from iteration {iter_or_ep}")
+        else:
+            print("[HanabiRunner] No checkpoint file found, starting fresh training state")
+
+    def evaluate(self, num_eval_episodes: int = 500, current_iteration: int = 0) -> dict:
+        """
+        Run evaluation episodes and collect statistics.
+
+        Args:
+            num_eval_episodes: Number of episodes to run for evaluation
+            current_iteration: Current training iteration number
+
+        Returns:
+            Dictionary with evaluation statistics (mean, std, max, min scores, distribution)
+        """
+        if self.eval_envs is None:
+            print("[HanabiRunner][EVAL] No evaluation environments available, skipping evaluation")
+            return {}
+
+        eval_start_time = time.time()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        print(f"[HanabiRunner][EVAL] Starting evaluation: {num_eval_episodes} episodes at iteration {current_iteration}")
+
+        self.agent.prep_rollout()  # Set networks to eval mode
+
+        eval_episode_scores = []
+        eval_episode_positive_rewards = []
+        episodes_completed = 0
+
+        n_eval_envs = self.eval_envs.num_envs
+
+        # Initialize environments - reset all environments
+        reset_choose = np.ones(n_eval_envs, dtype=bool)
+        obs, share_obs, available_actions = self.eval_envs.reset(reset_choose)
+        eval_obs = obs.copy()
+        eval_share_obs = share_obs if self.use_centralized_V else obs.copy()
+        eval_available_actions = available_actions.copy()
+
+        # Track which environments should continue collecting episodes
+        envs_active = np.ones(n_eval_envs, dtype=bool)
+        # Track cumulative positive reward for each active episode
+        episode_positive_rewards = np.zeros(n_eval_envs, dtype=np.float32)
+
+        max_iterations = num_eval_episodes * 100  # Safety limit to avoid infinite loops
+        iteration_count = 0
+
+        while episodes_completed < num_eval_episodes and iteration_count < max_iterations:
+            iteration_count += 1
+
+            # Check for environments that have no available actions BEFORE trying to step
+            # This prevents trying to act on environments that are already done
+            no_actions_before_step = ~np.any(eval_available_actions == 1, axis=1)
+
+            # Process environments with no actions as done BEFORE stepping
+            envs_to_reset = np.zeros(n_eval_envs, dtype=bool)
+            for env_idx in range(n_eval_envs):
+                if no_actions_before_step[env_idx] and envs_active[env_idx]:
+                    # Mark for reset without collecting score (should have been collected last iter)
+                    if episodes_completed < num_eval_episodes:
+                        envs_to_reset[env_idx] = True
+                        envs_active[env_idx] = False
+
+            # Reset environments that had no actions
+            if np.any(envs_to_reset):
+                obs_reset, share_obs_reset, available_reset = self.eval_envs.reset(envs_to_reset)
+                eval_obs[envs_to_reset] = obs_reset[envs_to_reset]
+                eval_share_obs[envs_to_reset] = share_obs_reset[envs_to_reset]
+                eval_available_actions[envs_to_reset] = available_reset[envs_to_reset]
+                envs_active[envs_to_reset] = True
+
+            # Find environments that have available actions and are still active
+            env_has_actions = envs_active & (np.any(eval_available_actions == 1, axis=1))
+
+            if not np.any(env_has_actions):
+                # No environments ready - all must be done
+                break
+
+            # Get actions for active environments
+            with torch.no_grad():
+                _, actions, _ = self.agent.get_actions(
+                    torch.as_tensor(eval_share_obs[env_has_actions], dtype=torch.float32, device=self.device),
+                    torch.as_tensor(eval_obs[env_has_actions], dtype=torch.float32, device=self.device),
+                    torch.as_tensor(eval_available_actions[env_has_actions], dtype=torch.float32, device=self.device),
+                )
+
+            actions = actions.detach().cpu().numpy()
+
+            # Create full action array (-1 for inactive envs)
+            eval_actions = np.ones((n_eval_envs, 1), dtype=np.float32) * (-1.0)
+            eval_actions[env_has_actions] = actions
+
+            # Step environment - the environment handles turn management
+            obs, share_obs, rewards, dones, infos, available_actions = self.eval_envs.step(eval_actions)
+
+            # Convert dones to boolean array (handles None values from invalid actions)
+            dones = np.asarray(dones, dtype=bool)
+
+            # Accumulate positive rewards for each environment
+            rewards_array = np.asarray(rewards, dtype=np.float32)
+            env_rewards = rewards_array.reshape(n_eval_envs, -1).sum(axis=1)
+            positive_rewards = np.maximum(env_rewards, 0.0)
+            episode_positive_rewards += positive_rewards
+
+            eval_obs = obs.copy()
+            eval_share_obs = share_obs if self.use_centralized_V else obs.copy()
+            eval_available_actions = available_actions.copy()
+
+            # Process done episodes and reset them for next episode
+            envs_to_reset_after_done = np.zeros(n_eval_envs, dtype=bool)
+            for env_idx in range(n_eval_envs):
+                # Check if explicitly done
+                if dones[env_idx] and envs_active[env_idx]:
+                    # Extract score from info
+                    info = infos[env_idx] if isinstance(infos, (list, tuple)) else infos
+                    if isinstance(info, dict) and "score" in info:
+                        score = info["score"]
+                        eval_episode_scores.append(float(score))
+                        # Record the cumulative positive reward for this completed episode
+                        eval_episode_positive_rewards.append(float(episode_positive_rewards[env_idx]))
+                        episodes_completed += 1
+
+                        # If we still need more episodes, reset this environment for the next episode
+                        if episodes_completed < num_eval_episodes:
+                            envs_to_reset_after_done[env_idx] = True
+                            # Reset the positive reward counter for the new episode
+                            episode_positive_rewards[env_idx] = 0.0
+                        else:
+                            # We've reached the target, deactivate this environment
+                            envs_active[env_idx] = False
+
+            # Reset environments that completed episodes and need to continue
+            if np.any(envs_to_reset_after_done):
+                obs_reset, share_obs_reset, available_reset = self.eval_envs.reset(envs_to_reset_after_done)
+                eval_obs[envs_to_reset_after_done] = obs_reset[envs_to_reset_after_done]
+                eval_share_obs[envs_to_reset_after_done] = share_obs_reset[envs_to_reset_after_done]
+                eval_available_actions[envs_to_reset_after_done] = available_reset[envs_to_reset_after_done]
+                # Keep these environments active for the next episode
+                # (they're already active, no need to set envs_active[envs_to_reset_after_done] = True)
+
+        eval_duration = time.time() - eval_start_time
+
+        if iteration_count >= max_iterations:
+            print(f"[HanabiRunner][EVAL] Warning: Hit iteration limit ({max_iterations})")
+
+        # Compute statistics
+        if len(eval_episode_scores) == 0:
+            print("[HanabiRunner][EVAL] Warning: No episodes completed during evaluation")
+            return {'mean': 0.0, 'std': 0.0, 'variance': 0.0, 'max': 0.0, 'min': 0.0, 'count': 0}
+
+        # Statistics for final scores (official metric)
+        eval_scores_array = np.array(eval_episode_scores)
+        mean_score = float(np.mean(eval_scores_array))
+        std_score = float(np.std(eval_scores_array))
+        variance_score = float(np.var(eval_scores_array))
+        max_score = float(np.max(eval_scores_array))
+        min_score = float(np.min(eval_scores_array))
+        unique_scores, counts = np.unique(eval_scores_array, return_counts=True)
+        score_distribution = ", ".join([f"{int(score)}:{int(count)}" for score, count in zip(unique_scores, counts)])
+
+        # Statistics for cumulative positive rewards (learning signal)
+        eval_positive_rewards_array = np.array(eval_episode_positive_rewards)
+        mean_positive_reward = float(np.mean(eval_positive_rewards_array))
+        std_positive_reward = float(np.std(eval_positive_rewards_array))
+        variance_positive_reward = float(np.var(eval_positive_rewards_array))
+        max_positive_reward = float(np.max(eval_positive_rewards_array))
+        min_positive_reward = float(np.min(eval_positive_rewards_array))
+        # Convert to cards played (divide by num_agents since each card gives reward to all players)
+        cards_played_array = eval_positive_rewards_array / self.num_agents
+        mean_cards_played = float(np.mean(cards_played_array))
+        unique_cards, counts_cards = np.unique(cards_played_array.astype(int), return_counts=True)
+        cards_distribution = ", ".join([f"{int(cards)}cards:{int(count)}" for cards, count in zip(unique_cards, counts_cards)])
+
+        eval_stats = {
+            'mean': mean_score,
+            'std': std_score,
+            'variance': variance_score,
+            'max': max_score,
+            'min': min_score,
+            'count': len(eval_episode_scores),
+            'distribution': score_distribution,
+            'mean_positive_reward': mean_positive_reward,
+            'mean_cards_played': mean_cards_played,
+            'cards_distribution': cards_distribution
+        }
+
+        # Create comprehensive report
+        report_lines = [
+            "=" * 80,
+            f"EVALUATION REPORT - Iteration {current_iteration}",
+            f"Timestamp: {timestamp}",
+            f"Duration: {eval_duration:.2f} seconds",
+            "=" * 80,
+            f"Episodes completed: {len(eval_episode_scores)}",
+            "",
+            "FINAL SCORE (Official Metric - 0 if bombed out):",
+            f"  Mean: {mean_score:.4f}",
+            f"  Variance: {variance_score:.4f}",
+            f"  Std deviation: {std_score:.4f}",
+            f"  Max: {max_score:.2f}",
+            f"  Min: {min_score:.2f}",
+            f"  Distribution: {score_distribution}",
+            "",
+            "CUMULATIVE POSITIVE REWARD (Learning Progress - cards played before death):",
+            f"  Mean Reward: {mean_positive_reward:.4f} (≈{mean_cards_played:.2f} cards played per game)",
+            f"  Variance: {variance_positive_reward:.4f}",
+            f"  Std deviation: {std_positive_reward:.4f}",
+            f"  Max: {max_positive_reward:.2f} (≈{max_positive_reward/self.num_agents:.0f} cards)",
+            f"  Min: {min_positive_reward:.2f} (≈{min_positive_reward/self.num_agents:.0f} cards)",
+            f"  Distribution by cards played: {cards_distribution}",
+            "=" * 80,
+        ]
+        report = "\n".join(report_lines)
+
+        # Print report to console
+        print(report)
+
+        # Write report to log file
+        log_dir = self.save_dir.parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"eval_iter_{current_iteration}.txt"
+
+        with open(log_file, 'w') as f:
+            f.write(report + "\n")
+
+        print(f"[HanabiRunner][EVAL] Results saved to {log_file}")
+
+        return eval_stats
+
     def run(self):
         if self.envs is None:
             raise RuntimeError("Training environments are not initialised.")
 
         self.warmup()
 
-        episodes = (
+        num_iterations = (
             self.num_env_steps // self.episode_length // self.n_rollout_threads
         )
 
         total_env_steps = 0
         finished_episodes = 0
 
-        for episode in range(episodes):
+        for iteration in range(num_iterations):
+            # Track scores and positive rewards for this iteration
+            iteration_start_score_count = len(self.episode_scores)
+            iteration_start_positive_reward_count = len(self.episode_positive_reward_history)
+
             for step in range(self.episode_length):
                 self.reset_choose = np.zeros(self.n_rollout_threads, dtype=bool)
                 finished_episodes += self._collect(step)
@@ -331,9 +671,7 @@ class HanabiRunner:
                     ] = reset_available[self.reset_choose]
                     self.env_live_mask[self.reset_choose] = True
 
-                # self.buffer.share_obs[self.buffer.step] = self.use_share_obs.copy()
-                # self.buffer.obs[self.buffer.step] = self.use_obs.copy()
-                
+                # Tile across agents when writing into the buffer
                 share_b = _tile_agents(self.use_share_obs, self.num_agents)
                 obs_b   = _tile_agents(self.use_obs, self.num_agents)    
                 self.buffer.share_obs[self.buffer.step] = share_b
@@ -414,9 +752,9 @@ class HanabiRunner:
             else:
                 r_mean = r_max = r_min = l_mean = 0.0
 
-            # write a CSV row (episode-level)
+            # write a CSV row (iteration-level)
             self.metrics_csv.writerow([
-                int(episode), int(total_env_steps),
+                int(iteration), int(total_env_steps),
                 mean_score,
                 r_mean, r_max, r_min, l_mean,
                 adv_mean, adv_std
@@ -425,14 +763,54 @@ class HanabiRunner:
             # === end append metrics ===
             self.buffer.after_update()
 
-            if episode % self.log_interval == 0 and self.episode_scores:
-                mean_score = float(np.mean(self.episode_scores[-10:]))
-                # print(
-                #     f"[HanabiRunner] Episode {episode} mean score (last 10): {mean_score:.2f}"
-                # )
-                self.log.info(
-                    f"[HanabiRunner] Episode {episode} mean score (last 10): {mean_score:.2f}"
-                )
+            if iteration % self.log_interval == 0:
+                # Calculate statistics for episodes completed during this iteration
+                iteration_scores = self.episode_scores[iteration_start_score_count:]
+                iteration_positive_rewards = self.episode_positive_reward_history[iteration_start_positive_reward_count:]
+
+                if len(iteration_scores) > 0:
+                    # Calculate mean final score (official metric)
+                    mean_score = float(np.mean(iteration_scores))
+                    scores_array = np.array(iteration_scores)
+                    unique_scores, counts = np.unique(scores_array, return_counts=True)
+                    score_distribution = ", ".join([f"{int(score)}:{int(count)}" for score, count in zip(unique_scores, counts)])
+
+                    # Calculate mean cumulative positive reward (learning signal)
+                    mean_positive_reward = float(np.mean(iteration_positive_rewards))
+                    positive_rewards_array = np.array(iteration_positive_rewards)
+                    # Divide by num_agents to get cards played (each card gives reward to all players)
+                    cards_played_array = positive_rewards_array / self.num_agents
+                    unique_cards, counts_cards = np.unique(cards_played_array.astype(int), return_counts=True)
+                    cards_distribution = ", ".join([f"{int(cards)}cards:{int(count)}" for cards, count in zip(unique_cards, counts_cards)])
+
+                    print(
+                        f"[HanabiRunner] Iteration {iteration}/{num_iterations} (n={len(iteration_scores)} games)\n"
+                        f"  Final Score: {mean_score:.2f} (distribution: {score_distribution})\n"
+                        f"  Cumulative +Reward: {mean_positive_reward:.2f} (≈{mean_positive_reward/self.num_agents:.2f} cards played, distribution: {cards_distribution})"
+                    )
+                else:
+                    print(
+                        f"[HanabiRunner] Iteration {iteration}/{num_iterations} "
+                        f"(no games completed in this iteration)"
+                    )
+
+            # Run evaluation periodically
+            if self.use_eval and iteration % self.eval_interval == 0 and iteration > 0:
+                eval_stats = self.evaluate(num_eval_episodes=self.all_args.eval_episodes, current_iteration=iteration)
+                # Switch back to training mode after evaluation
+                self.agent.prep_training()
+
+            # Save model periodically
+            if iteration % self.save_interval == 0:
+                self.save(iteration)
+
+        # Save final model
+        self.save(num_iterations)
+
+        # Run final evaluation
+        if self.use_eval:
+            print("[HanabiRunner] Running final evaluation...")
+            eval_stats = self.evaluate(num_eval_episodes=self.all_args.eval_episodes, current_iteration=num_iterations)
 
         # print(
         #     f"[HanabiRunner] Completed {total_env_steps} environment steps across {finished_episodes} episodes."
@@ -503,6 +881,9 @@ class HanabiRunner:
             rewards = np.asarray(rewards, dtype=np.float32)
             env_reward = rewards.reshape(self.n_rollout_threads, -1).sum(axis=1)
             self.current_episode_reward[choose] += env_reward[choose]
+            # Track cumulative positive rewards (ignore negative rewards from bombing out)
+            positive_reward = np.maximum(env_reward, 0.0)
+            self.current_episode_positive_reward[choose] += positive_reward[choose]
             self.current_episode_length[choose] += 1
             self.turn_rewards[choose, current_agent_id] = (
                 self.turn_rewards_since_last_action[choose, current_agent_id].copy()
@@ -547,8 +928,10 @@ class HanabiRunner:
                     if isinstance(info, dict) and "score" in info:
                         self.episode_scores.append(info["score"])
                     self.episode_reward_history.append(float(self.current_episode_reward[env_idx]))
+                    self.episode_positive_reward_history.append(float(self.current_episode_positive_reward[env_idx]))
                     self.episode_length_history.append(int(self.current_episode_length[env_idx]))
                     self.current_episode_reward[env_idx] = 0.0
+                    self.current_episode_positive_reward[env_idx] = 0.0
                     self.current_episode_length[env_idx] = 0
                     finished_this_step += 1
 
