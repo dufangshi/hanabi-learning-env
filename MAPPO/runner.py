@@ -353,7 +353,7 @@ class HanabiRunner:
             next_values = next_values.detach().cpu().numpy()
             next_values = np.repeat(next_values[:, None, :], self.num_agents, axis=1)
             self.buffer.compute_returns_and_advantages(
-                torch.as_tensor(next_values, dtype=torch.float32)
+                torch.as_tensor(next_values, dtype=torch.float32),self.agent.value_normalizer
             )
 
             last_train_info = self.agent.train(self.buffer)

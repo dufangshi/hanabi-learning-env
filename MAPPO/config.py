@@ -27,6 +27,7 @@ class HanabiConfig:
     huber_delta: float
     entropy_coef: float
     value_loss_coef: float
+    use_valuenorm: bool
     max_grad_norm: float
     ppo_epoch: int
     num_mini_batch: int
@@ -101,6 +102,8 @@ def get_config() -> HanabiConfig:
                         help="entropy regularisation coefficient.")
     parser.add_argument("--value_loss_coef", type=float, default=0.5,
                         help="value loss coefficient.")
+    parser.add_argument("--use_valuenorm", action='store_false', default=True, 
+                        help="by default True, use running mean and std to normalize rewards.") 
     parser.add_argument("--max_grad_norm", type=float, default=0.5,
                         help="gradient norm clipping value.")
     parser.add_argument("--ppo_epoch", type=int, default=4,

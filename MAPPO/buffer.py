@@ -127,8 +127,15 @@ class RolloutBuffer:
         self.ptr = 0
         self.advantages.fill(0.0)
         self.advs.zero_()
+ 
+    def compute_returns_and_advantages(self, next_values: torch.Tensor, value_normalizer=None) -> None:
+        """
+        Compute GAE advantages and returns, optionally applying value normalization.
 
-    def compute_returns_and_advantages(self, next_values: torch.Tensor) -> None:
+        Args:
+            next_values (torch.Tensor): Value predictions for the step after the last.
+            value_normalizer (optional): Value normalization module (e.g., ValueNorm).
+        """
         if self.ptr == 0:
             return
 
@@ -140,19 +147,38 @@ class RolloutBuffer:
         gae = np.zeros((self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
         for step in reversed(range(self.ptr)):
             mask = self.masks[step + 1]
-            delta = (
-                self.rewards[step]
-                + self.gamma * self.value_preds[step + 1] * mask
-                - self.value_preds[step]
-            )
+
+            if value_normalizer is not None:
+                # convert to tensor and denormalize
+                next_val_t = value_normalizer.denormalize(torch.as_tensor(self.value_preds[step + 1]))
+                curr_val_t = value_normalizer.denormalize(torch.as_tensor(self.value_preds[step]))
+
+                # ensure NumPy type for consistent math
+                next_val = next_val_t.detach().cpu().numpy()
+                curr_val = curr_val_t.detach().cpu().numpy()
+
+                delta = (
+                    self.rewards[step]
+                    + self.gamma * next_val * mask
+                    - curr_val
+                )
+            else:
+                delta = (
+                    self.rewards[step]
+                    + self.gamma * self.value_preds[step + 1] * mask
+                    - self.value_preds[step]
+                )
             gae = delta + self.gamma * self.gae_lambda * mask * gae
             self.advantages[step] = gae
-            self.returns[step] = gae + self.value_preds[step]
+
+            if value_normalizer is not None:
+                self.returns[step] = gae + curr_val
+            else:
+                self.returns[step] = gae + self.value_preds[step]
 
         advs_tensor = torch.from_numpy(self.advantages[: self.ptr])
         self.advs.zero_()
         self.advs[: self.ptr] = advs_tensor.to(self.device)
-
     def feed_forward_generator(
         self, advantages: torch.Tensor, num_mini_batch: int
     ) -> Generator[Dict[str, torch.Tensor], None, None]:
