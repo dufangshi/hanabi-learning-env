@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - fallback when executed directly
 
 # #CITAITON: inspired by  https://github.com/zoeyuchao/mappo/blob/79f6591882088a0f583f7a4bcba44041141f25f5/onpolicy/utils/valuenorm.py 
 class ValueNorm(nn.Module):
-    """Maintains running mean/variance for value normalization (PopArt-style)."""
+    """Maintains running mean and variance for value normalization."""
 
     def __init__(self, shape, norm_axes=1, beta=0.99999, epsilon=1e-5, per_element=False):
         super().__init__()
@@ -41,7 +41,7 @@ class ValueNorm(nn.Module):
 
     @torch.no_grad()
     def update(self, x):
-        """Update running statistics with a new batch."""
+        """Update running meaning and variance with a new batch."""
         if isinstance(x, np.ndarray):
             x = torch.from_numpy(x)
         x = x.to(self.mean.device, dtype=torch.float32)
@@ -50,14 +50,13 @@ class ValueNorm(nn.Module):
         batch_mean = x.mean(dim=axes)
         batch_mean_sq = (x ** 2).mean(dim=axes)
 
-        # Weighted update
         weight = self.beta ** np.prod(x.shape[:self.norm_axes]) if self.per_element else self.beta
         self.mean.mul_(weight).add_(batch_mean * (1 - weight))
         self.mean_sq.mul_(weight).add_(batch_mean_sq * (1 - weight))
         self.count.mul_(weight).add_(1 - weight)
 
     def normalize(self, x):
-        """Normalize input using running mean/variance."""
+        """Normalize input using stored statistics"""
         if isinstance(x, np.ndarray):
             x = torch.from_numpy(x)
         x = x.to(self.mean.device, dtype=torch.float32)
