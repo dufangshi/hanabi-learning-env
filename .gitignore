@@ -34,3 +34,7 @@ CMakeFiles/
 
 on-policy-main*
 results/*
+!results/Hanabi/Hanabi-Full/mappo/check/run17/models/actor_latest.pt
+!results/Hanabi/Hanabi-Full/mappo/check/run17/models/config.json
+!results/Hanabi/Hanabi-Full/mappo/check/run17/models/critic_latest.pt
+!results/Hanabi/Hanabi-Full/mappo/check/run17/models/checkpoint_latest.pt
