@@ -35,9 +35,12 @@ class HanabiConfig:
     opti_eps: float
     weight_decay: float
     save_interval: int
+    model_dir: str
+    result_dir: str
     log_interval: int
     use_eval: bool
     eval_interval: int
+    eval_episodes: int
 
 def get_config() -> HanabiConfig:
     """
@@ -52,11 +55,11 @@ def get_config() -> HanabiConfig:
     # prepare parameters
     parser.add_argument("--algorithm_name", type=str, default='mappo')
     parser.add_argument("--experiment_name", type=str, default="check", help="an identifier to distinguish different experiment.")
-    parser.add_argument("--n_rollout_threads", type=int, default=512,
+    parser.add_argument("--n_rollout_threads", type=int, default=1000,
                         help="Number of parallel envs for training rollouts")
-    parser.add_argument("--n_eval_rollout_threads", type=int, default=1,
-                        help="Number of parallel envs for evaluating rollouts")
-    parser.add_argument("--num_env_steps", type=int, default=10e6,
+    parser.add_argument("--n_eval_rollout_threads", type=int, default=10,
+                        help="Number of parallel envs for evaluating rollouts (default: 10, recommended >= 10 for faster evaluation)")
+    parser.add_argument("--num_env_steps", type=int, default=10e10,
                         help='Number of environment steps to train (default: 10e6)')    
 
     # env parameters
@@ -73,23 +76,23 @@ def get_config() -> HanabiConfig:
 
     # replay buffer parameters
     parser.add_argument("--episode_length", type=int,
-                        default=200, help="Max length for any episode")
+                        default=100, help="Max length for any episode")
 
     # network parameters
-    parser.add_argument("--hidden_layer_dim", type=int, default=128) 
+    parser.add_argument("--hidden_layer_dim", type=int, default=256) 
     parser.add_argument("--use_feature_normalization", type=bool, default=False) 
     parser.add_argument("--use_orthogonal", type=int, default=1) 
     parser.add_argument("--use_ReLU", type=bool, default=True) 
     parser.add_argument("--layer_N", type=int, default=2)
 
     # ppo parameters
-    parser.add_argument("--clip_param", type=float, default=0.2,
+    parser.add_argument("--clip_param", type=float, default=0.15,
                         help='ppo clip parameter (default: 0.2)')
     parser.add_argument("--clip_epsilon", type=float, default=None,
                         help="override clip_param for PPO clip range; defaults to clip_param")
     parser.add_argument("--use_clipped_value_loss",
                         action='store_false', default=True, help="by default, clip loss value. If set, do not clip loss value.")
-    parser.add_argument("--gamma", type=float, default=0.99,
+    parser.add_argument("--gamma", type=float, default=0.985,
                         help='discount factor for rewards (default: 0.99)')
     parser.add_argument("--gae_lambda", type=float, default=0.95,
                         help='gae lambda parameter (default: 0.95)')
@@ -97,7 +100,7 @@ def get_config() -> HanabiConfig:
                         help="by default, use huber loss. If set, do not use huber loss.")
     parser.add_argument("--huber_delta", type=float, default=1.0,
                         help="delta value for SmoothL1 (Huber) loss.")
-    parser.add_argument("--entropy_coef", type=float, default=0.01,
+    parser.add_argument("--entropy_coef", type=float, default=0.015,
                         help="entropy regularisation coefficient.")
     parser.add_argument("--value_loss_coef", type=float, default=0.5,
                         help="value loss coefficient.")
@@ -117,14 +120,17 @@ def get_config() -> HanabiConfig:
                         help="optional L2 weight decay.")
 
     # save parameters
-    parser.add_argument("--save_interval", type=int, default=1, help="time duration between contiunous twice models saving.")
+    parser.add_argument("--save_interval", type=int, default=1000, help="save model every N episodes (default: 1000)")
+    parser.add_argument("--model_dir", type=str, default=None, help="directory to load pretrained models for resuming training.")
+    parser.add_argument("--result_dir", type=str, default="./results", help="root directory to save training results.")
 
     # log parameters
     parser.add_argument("--log_interval", type=int, default=5, help="time duration between continuous twice log printing.")
 
     # eval parameters
-    parser.add_argument("--use_eval", action='store_true', default=False, help="by default, do not start evaluation. If set`, start evaluation alongside with training.")
-    parser.add_argument("--eval_interval", type=int, default=25, help="time duration between contiunous twice evaluation progress.")
+    parser.add_argument("--use_eval", action='store_true', default=True, help="by default, do not start evaluation. If set`, start evaluation alongside with training.")
+    parser.add_argument("--eval_interval", type=int, default=100, help="evaluate every N training iterations (default: 100)")
+    parser.add_argument("--eval_episodes", type=int, default=500, help="number of episodes to run for each evaluation (default: 500)")
 
     args = parser.parse_args()  #TODO might need to change to parser.parse_known_args() if using framework that adds its own unknown args e.g. wandb
     if args.clip_epsilon is None:

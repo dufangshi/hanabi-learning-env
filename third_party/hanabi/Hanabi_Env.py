@@ -117,56 +117,8 @@ class HanabiEnv(Environment):
               - random_start_player: bool, Random start player.
         """
         self._seed = seed
-        # max:action 48 obs=1380 min:action=20 obs=783 score=25
-        if (args.hanabi_name == "Hanabi-Full" or args.hanabi_name == "Hanabi-Full-CardKnowledge"):
-            config = {
-                "colors": 5,
-                "ranks": 5,
-                "players": args.num_agents,
-                "max_information_tokens": 8,
-                "max_life_tokens": 3,
-                "observation_type": pyhanabi.AgentObservationType.CARD_KNOWLEDGE.value,
-                "seed": self._seed
-            }
-        # max:action 48 obs=680 min:action=20 obs=433 score=25 use memory
-        elif args.hanabi_name == "Hanabi-Full-Minimal":
-            config = {
-                "colors": 5,
-                "ranks": 5,
-                "players": args.num_agents,
-                "max_information_tokens": 8,
-                "max_life_tokens": 3,
-                "observation_type": pyhanabi.AgentObservationType.MINIMAL.value,
-                "seed": self._seed
-            }
-        elif args.hanabi_name == "Hanabi-Small":  # max:action=32 obs=356 min:action=11 obs=191 score=10
-            config = {
-                "colors": 2,
-                "ranks": 5,
-                "players": args.num_agents,
-                "hand_size": 2,
-                "max_information_tokens": 3,
-                "max_life_tokens": 1,
-                "observation_type": pyhanabi.AgentObservationType.CARD_KNOWLEDGE.value,
-                "seed": self._seed
-            }
-        elif args.hanabi_name == "Hanabi-Very-Small":  # max:action=28 obs=215 min:action=10 obs=116 score=5
-            config = {
-                "colors": 1,
-                "ranks": 5,
-                "players": args.num_agents,
-                "hand_size": 2,
-                "max_information_tokens": 3,
-                "max_life_tokens": 1,
-                "observation_type": pyhanabi.AgentObservationType.CARD_KNOWLEDGE.value,
-                "seed": self._seed
-            }
-        else:
-            raise ValueError("Unknown environment {}".format(args.hanabi_name))
-
-        assert isinstance(config, dict), "Expected config to be of type dict."
-
-        self.game = pyhanabi.HanabiGame(config)
+        self._args = args  # Store args for game recreation
+        self._recreate_game()  # Create initial game object
         self.obs_instead_of_state = args.use_obs_instead_of_state
 
         self.observation_encoder = pyhanabi.ObservationEncoder(
@@ -181,6 +133,75 @@ class HanabiEnv(Environment):
                 [self.vectorized_observation_shape()[0]+self.players])
             self.share_observation_space.append(
                 [self.vectorized_share_observation_shape()[0]+self.players])
+
+    def _recreate_game(self):
+        """Recreate the HanabiGame object with a new random seed.
+
+        This ensures each episode has independent card shuffling,
+        preventing overfitting to specific dealing sequences.
+        """
+        import random
+
+        # Generate new random seed for each game
+        # Use Python's random.randint to ensure value is within int32 range
+        # Range: 0 to 2147483647 (INT_MAX for 32-bit signed int)
+        new_seed = random.randint(0, 2147483647)
+
+        # Build config based on game type
+        args = self._args
+        if (args.hanabi_name == "Hanabi-Full" or args.hanabi_name == "Hanabi-Full-CardKnowledge"):
+            config = {
+                "colors": 5,
+                "ranks": 5,
+                "players": args.num_agents,
+                "max_information_tokens": 8,
+                "max_life_tokens": 3,
+                "observation_type": pyhanabi.AgentObservationType.CARD_KNOWLEDGE.value,
+                "seed": new_seed
+            }
+        elif args.hanabi_name == "Hanabi-Full-Minimal":
+            config = {
+                "colors": 5,
+                "ranks": 5,
+                "players": args.num_agents,
+                "max_information_tokens": 8,
+                "max_life_tokens": 3,
+                "observation_type": pyhanabi.AgentObservationType.MINIMAL.value,
+                "seed": new_seed
+            }
+        elif args.hanabi_name == "Hanabi-Small":
+            config = {
+                "colors": 2,
+                "ranks": 5,
+                "players": args.num_agents,
+                "hand_size": 2,
+                "max_information_tokens": 3,
+                "max_life_tokens": 1,
+                "observation_type": pyhanabi.AgentObservationType.CARD_KNOWLEDGE.value,
+                "seed": new_seed
+            }
+        elif args.hanabi_name == "Hanabi-Very-Small":
+            config = {
+                "colors": 1,
+                "ranks": 5,
+                "players": args.num_agents,
+                "hand_size": 2,
+                "max_information_tokens": 3,
+                "max_life_tokens": 1,
+                "observation_type": pyhanabi.AgentObservationType.CARD_KNOWLEDGE.value,
+                "seed": new_seed
+            }
+        else:
+            raise ValueError("Unknown environment {}".format(args.hanabi_name))
+
+        assert isinstance(config, dict), "Expected config to be of type dict."
+
+        # Create new game with fresh RNG
+        self.game = pyhanabi.HanabiGame(config)
+
+        # Recreate observation encoder for the new game
+        self.observation_encoder = pyhanabi.ObservationEncoder(
+            self.game, pyhanabi.ObservationEncoderType.CANONICAL)
 
     def seed(self, seed=None):
         if seed is None:
@@ -289,6 +310,10 @@ class HanabiEnv(Environment):
                                       'vectorized': [ 0, 0, 1, ... ]}]}
         """
         if choose:
+            # Recreate game with new random seed for each episode
+            # This prevents overfitting to fixed card dealing sequences
+            self._recreate_game()
+
             self.state = self.game.new_initial_state()
 
             while self.state.cur_player() == pyhanabi.CHANCE_PLAYER_ID:
@@ -476,6 +501,40 @@ class HanabiEnv(Environment):
         else:
             raise ValueError("Expected action as dict or int, got: {}".format(action))
 
+
+        # Guard: if state is already terminal, don't apply move
+        # This prevents C++ assertion failures when evaluation loop continues stepping after done=True
+        if self.state.is_terminal():
+            # Return current observation without applying move
+            observation = self._make_observation_all_players()
+
+            # IMPORTANT: cur_player() may return invalid ID when terminal
+            # Use player 0 as a safe default for returning observations
+            current_player_raw = self.state.cur_player()
+            current_player = 0 if (current_player_raw < 0 or current_player_raw >= self.players) else current_player_raw
+
+            player_observations = observation['player_observations']
+
+            # IMPORTANT: Return empty available_actions so evaluation loop knows to reset/stop
+            available_actions = np.zeros(self.num_moves())
+
+            agent_turn = np.zeros(self.players, dtype=int).tolist()
+            agent_turn[current_player] = 1
+
+            obs = player_observations[current_player]['vectorized'] + agent_turn
+            if self.obs_instead_of_state:
+                share_obs = [player_observations[i]['vectorized'] for i in range(self.players)]
+                concat_obs = np.concatenate(share_obs, axis=0)
+                share_obs = np.concatenate((concat_obs, agent_turn), axis=0)
+            else:
+                share_obs = player_observations[current_player]['vectorized_ownhand'] + player_observations[current_player]['vectorized'] + agent_turn
+
+            done = True
+            rewards = [[0]] * self.players
+            infos = {'score': self.state.score()}
+
+            return obs, share_obs, rewards, done, infos, available_actions
+
         last_score = self.state.score()
         # Apply the action to the state.
         self.state.apply_move(action)
@@ -504,10 +563,42 @@ class HanabiEnv(Environment):
         done = self.state.is_terminal()
         # Reward is score differential. May be large and negative at game end.
         reward = self.state.score() - last_score
+
+        # Add extra death penalty if game ended due to life tokens = 0
+        if done and self.state.life_tokens() <= 0:
+            reward -= 20  # Extra penalty for bombing out
+
         rewards = [[reward]] * self.players
         infos = {'score': self.state.score()}
 
         return obs, share_obs, rewards, done, infos, available_actions
+
+    def get_state(self):
+        """
+        Get the current HanabiState object for analysis.
+
+        Returns:
+            HanabiState: The current game state
+        """
+        return self.state
+
+    def get_game(self):
+        """
+        Get the HanabiGame object for this environment.
+
+        Returns:
+            HanabiGame: The game configuration object
+        """
+        return self.game
+
+    def get_move_history(self):
+        """
+        Get the complete move history of the current game.
+
+        Returns:
+            list: List of HanabiHistoryItem objects
+        """
+        return self.state.move_history()
 
     def _make_observation_all_players(self):
         """Make observation for all players.
