@@ -203,6 +203,36 @@ class ChooseDummyVecEnv(ShareVecEnv):
         else:
             raise NotImplementedError
 
+    def get_state(self, env_idx):
+        """
+        Get the HanabiState object from a specific environment.
+
+        Args:
+            env_idx: Index of the environment
+
+        Returns:
+            HanabiState object or None if not available
+        """
+        if 0 <= env_idx < len(self.envs):
+            if hasattr(self.envs[env_idx], 'get_state'):
+                return self.envs[env_idx].get_state()
+        return None
+
+    def get_game(self, env_idx):
+        """
+        Get the HanabiGame object from a specific environment.
+
+        Args:
+            env_idx: Index of the environment
+
+        Returns:
+            HanabiGame object or None if not available
+        """
+        if 0 <= env_idx < len(self.envs):
+            if hasattr(self.envs[env_idx], 'get_game'):
+                return self.envs[env_idx].get_game()
+        return None
+
 class ChooseSubprocVecEnv(ShareVecEnv):
     def __init__(self, env_fns, spaces=None):
         """

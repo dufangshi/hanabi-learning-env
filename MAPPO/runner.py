@@ -324,7 +324,7 @@ class HanabiRunner:
         self.current_episode_length.fill(0)
 
     def save(self, iteration=0):
-        """Save actor and critic networks along with training state."""
+        """Save actor and critic networks along with training state and config."""
         save_path_actor = self.save_dir / f"actor_iter{iteration}.pt"
         save_path_critic = self.save_dir / f"critic_iter{iteration}.pt"
         save_path_checkpoint = self.save_dir / f"checkpoint_iter{iteration}.pt"
@@ -341,6 +341,16 @@ class HanabiRunner:
             'episode_length_history': self.episode_length_history,
         }
         torch.save(checkpoint, str(save_path_checkpoint))
+
+        # Save training configuration (once per run, not per iteration)
+        config_path = self.save_dir / "config.json"
+        if not config_path.exists():
+            import json
+            from dataclasses import asdict
+            config_dict = asdict(self.all_args)
+            with open(config_path, 'w') as f:
+                json.dump(config_dict, f, indent=2)
+            print(f"[HanabiRunner] Saved config to {config_path}")
 
         print(f"[HanabiRunner] Saved model at iteration {iteration} to {self.save_dir}")
 

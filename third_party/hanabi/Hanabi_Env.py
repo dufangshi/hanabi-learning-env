@@ -501,6 +501,40 @@ class HanabiEnv(Environment):
         else:
             raise ValueError("Expected action as dict or int, got: {}".format(action))
 
+
+        # Guard: if state is already terminal, don't apply move
+        # This prevents C++ assertion failures when evaluation loop continues stepping after done=True
+        if self.state.is_terminal():
+            # Return current observation without applying move
+            observation = self._make_observation_all_players()
+
+            # IMPORTANT: cur_player() may return invalid ID when terminal
+            # Use player 0 as a safe default for returning observations
+            current_player_raw = self.state.cur_player()
+            current_player = 0 if (current_player_raw < 0 or current_player_raw >= self.players) else current_player_raw
+
+            player_observations = observation['player_observations']
+
+            # IMPORTANT: Return empty available_actions so evaluation loop knows to reset/stop
+            available_actions = np.zeros(self.num_moves())
+
+            agent_turn = np.zeros(self.players, dtype=int).tolist()
+            agent_turn[current_player] = 1
+
+            obs = player_observations[current_player]['vectorized'] + agent_turn
+            if self.obs_instead_of_state:
+                share_obs = [player_observations[i]['vectorized'] for i in range(self.players)]
+                concat_obs = np.concatenate(share_obs, axis=0)
+                share_obs = np.concatenate((concat_obs, agent_turn), axis=0)
+            else:
+                share_obs = player_observations[current_player]['vectorized_ownhand'] + player_observations[current_player]['vectorized'] + agent_turn
+
+            done = True
+            rewards = [[0]] * self.players
+            infos = {'score': self.state.score()}
+
+            return obs, share_obs, rewards, done, infos, available_actions
+
         last_score = self.state.score()
         # Apply the action to the state.
         self.state.apply_move(action)
@@ -538,6 +572,33 @@ class HanabiEnv(Environment):
         infos = {'score': self.state.score()}
 
         return obs, share_obs, rewards, done, infos, available_actions
+
+    def get_state(self):
+        """
+        Get the current HanabiState object for analysis.
+
+        Returns:
+            HanabiState: The current game state
+        """
+        return self.state
+
+    def get_game(self):
+        """
+        Get the HanabiGame object for this environment.
+
+        Returns:
+            HanabiGame: The game configuration object
+        """
+        return self.game
+
+    def get_move_history(self):
+        """
+        Get the complete move history of the current game.
+
+        Returns:
+            list: List of HanabiHistoryItem objects
+        """
+        return self.state.move_history()
 
     def _make_observation_all_players(self):
         """Make observation for all players.
