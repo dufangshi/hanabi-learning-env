@@ -33,8 +33,27 @@ CMakeCache.txt
 CMakeFiles/
 
 on-policy-main*
+
 results/*
+!results/Hanabi/
+results/Hanabi/*            # re-ignore inside, unless explicitly opened
+
+!results/Hanabi/Hanabi-Full/
+results/Hanabi/Hanabi-Full/*
+results/Hanabi/Hanabi-Very-Small/*
+
+!results/Hanabi/Hanabi-Full/mappo/
+results/Hanabi/Hanabi-Full/mappo/*
+
+!results/Hanabi/Hanabi-Full/mappo/check/
+results/Hanabi/Hanabi-Full/mappo/check/*
+
+!results/Hanabi/Hanabi-Full/mappo/check/run17/
+results/Hanabi/Hanabi-Full/mappo/check/run17/*
+
+!results/Hanabi/Hanabi-Full/mappo/check/run17/models/
+results/Hanabi/Hanabi-Full/mappo/check/run17/models/*
+
 !results/Hanabi/Hanabi-Full/mappo/check/run17/models/actor_latest.pt
 !results/Hanabi/Hanabi-Full/mappo/check/run17/models/config.json
 !results/Hanabi/Hanabi-Full/mappo/check/run17/models/critic_latest.pt
-!results/Hanabi/Hanabi-Full/mappo/check/run17/models/checkpoint_latest.pt

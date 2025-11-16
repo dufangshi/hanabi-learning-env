@@ -6,11 +6,15 @@
 4. Run `python main.py`; dependencies and the C++ extension will be built automatically on first install.
 
 
-### Evaluation
+### Continue training from checkpoint:
 ```
-python evaluate_model.py --model_dir results/.../models --iteration latest --hanabi_name Hanabi-Full --num_agents 2 --num_episodes 500 --num_envs 10 --save_log      
+python MAPPO/runner.py --model_dir results/Hanabi/Hanabi-Full/mappo/check/run17/models --hanabi_mode full
+```
+
+### Evaluation and Test
+```
+python evaluate_model.py --model_dir results/Hanabi/Hanabi-Full/mappo/check/run17/models --iteration latest --hanabi_name Hanabi-Full --num_agents 2 --num_episodes 1000 --num_envs 1 --save_log  --collect_statistics  
 ```
 
 
-python evaluate_model.py --model_dir results/Hanabi/Hanabi-Full/mappo/check/run14/models --iteration latest --hanabi_name Hanabi-Full --num_agents 2 --num_episodes 2000 --num_envs 10 --save_log      
 
