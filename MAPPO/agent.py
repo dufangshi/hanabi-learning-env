@@ -11,6 +11,69 @@ try:  # Support running as package/module
 except ImportError:  # pragma: no cover - fallback when executed directly
     from networks import ActorNetwork, CriticNetwork
 
+# #CITAITON: inspired by  https://github.com/zoeyuchao/mappo/blob/79f6591882088a0f583f7a4bcba44041141f25f5/onpolicy/utils/valuenorm.py 
+class ValueNorm(nn.Module):
+    """Maintains running mean and variance for value normalization."""
+
+    def __init__(self, shape, norm_axes=1, beta=0.99999, epsilon=1e-5, per_element=False):
+        super().__init__()
+        self.shape = shape if isinstance(shape, tuple) else (shape,)
+        self.norm_axes = norm_axes
+        self.beta = beta
+        self.epsilon = epsilon
+        self.per_element = per_element
+
+        self.register_buffer("mean", torch.zeros(self.shape))
+        self.register_buffer("mean_sq", torch.zeros(self.shape))
+        self.register_buffer("count", torch.tensor(0.0))
+
+    def reset_parameters(self):
+        self.mean.zero_()
+        self.mean_sq.zero_()
+        self.count.zero_()
+
+    def _debiased_stats(self):
+        debias = self.count.clamp(min=self.epsilon)
+        mean = self.mean / debias
+        mean_sq = self.mean_sq / debias
+        var = (mean_sq - mean ** 2).clamp(min=1e-2)
+        return mean, var
+
+    @torch.no_grad()
+    def update(self, x):
+        """Update running meaning and variance with a new batch."""
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        x = x.to(self.mean.device, dtype=torch.float32)
+
+        axes = tuple(range(self.norm_axes))
+        batch_mean = x.mean(dim=axes)
+        batch_mean_sq = (x ** 2).mean(dim=axes)
+
+        weight = self.beta ** np.prod(x.shape[:self.norm_axes]) if self.per_element else self.beta
+        self.mean.mul_(weight).add_(batch_mean * (1 - weight))
+        self.mean_sq.mul_(weight).add_(batch_mean_sq * (1 - weight))
+        self.count.mul_(weight).add_(1 - weight)
+
+    def normalize(self, x):
+        """Normalize input using stored statistics"""
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        x = x.to(self.mean.device, dtype=torch.float32)
+
+        mean, var = self._debiased_stats()
+        return (x - mean[(None,) * self.norm_axes]) / (torch.sqrt(var)[(None,) * self.norm_axes])
+
+    def denormalize(self, x):
+        """Reverse normalization."""
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        x = x.to(self.mean.device, dtype=torch.float32)
+
+        mean, var = self._debiased_stats()
+        return x * torch.sqrt(var)[(None,) * self.norm_axes] + mean[(None,) * self.norm_axes]
+
+
 
 
 def check(input):
@@ -58,6 +121,14 @@ class MAPPOAgent:
         self.use_huber_loss = getattr(args, "use_huber_loss", True)
         # self._use_recurrent_policy = args.use_recurrent_policy if hasattr(args, "use_recurrent_policy") else False
         # self._use_naive_recurrent = args.use_naive_recurrent_policy if hasattr(args, "use_naive_recurrent_policy") else False
+        
+        
+        self._use_valuenorm = args.use_valuenorm
+        if self._use_valuenorm:
+            self.value_normalizer = ValueNorm(1).to(self.device)
+        else:
+            self.value_normalizer = None
+
 
         #TODO: not sure if we need these
         # self._use_value_active_masks = args.use_value_active_masks
@@ -129,7 +200,7 @@ class MAPPOAgent:
             clipped_values = old_values + (values - old_values).clamp(-self.clip_epsilon, self.clip_epsilon)
             loss_unclipped = loss_fn(values, returns)
             loss_clipped = loss_fn(clipped_values, returns)
-            value_loss = torch.max(loss_unclipped, loss_clipped)
+            value_loss = torch.max(loss_unclipped, loss_clipped).mean() 
         else:
             value_loss = loss_fn(values, returns)
 
@@ -155,7 +226,7 @@ class MAPPOAgent:
         active_masks = _to_tpdv(batch["active_masks"], self.tpdv) if "active_masks" in batch and batch["active_masks"] is not None else None
 
         # Normalize advantages (stable)
-        advs = (advs - advs.mean()) / (advs.std(unbiased=False) + 1e-8)
+        # advs = (advs - advs.mean()) / (advs.std(unbiased=False) + 1e-8) #TODO:double normalization
 
         # ---- Actor ----
         new_log_probs, entropy = None, None
@@ -175,10 +246,18 @@ class MAPPOAgent:
                 entropy_loss = -(entropy * active_masks).sum() / (active_masks.sum() + 1e-8)
             else:
                 policy_loss = unclipped_actor_loss.mean()
-                entropy_loss = -entropy.mean()
+                entropy_loss = entropy.mean() #TODO: changed 
 
         # ---- Critic ----
         values = self.critic(cent_obs)
+        # TODO: add normalization integration
+        if self.value_normalizer is not None:
+            self.value_normalizer.update(returns.cpu().numpy())
+            returns = torch.as_tensor(
+                self.value_normalizer.normalize(returns), **self.tpdv
+            )
+            values = self.value_normalizer.normalize(values)
+
         value_loss = self._value_loss(values, returns, old_values)
 
         # ---- Optimize ----

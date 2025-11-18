@@ -73,10 +73,9 @@ class MLPLayer(nn.Module):
         self._layer_N = args.layer_N
         self.hidden_layer_dim = args.hidden_layer_dim
 
-        # TODO: implement
-        # # Optional normalization on input features
-        # if use_feature_normalization:
-        #     self.feature_norm = nn.LayerNorm(input_dim)
+        # Optional normalization on input features
+        if self._use_feature_normalization:
+            self.feature_norm = nn.LayerNorm(input_dim)
 
         # Choose activation and init methods
         activation = nn.ReLU() if self._use_ReLU else nn.Tanh()
